@@ -104,7 +104,7 @@
 * My general configs
 ** Evil config
 #+BEGIN_SRC emacs-lisp
-(map! :leader :desc "Split window right" "/" (lambda () (interactive) (split-window-right) (other-window 1)))
+(map! :leader :desc "Split window right" "w/" (lambda () (interactive) (split-window-right) (other-window 1)))
 #+END_SRC
 
 #+RESULTS:
