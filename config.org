@@ -115,8 +115,6 @@ SPC h r r OR M-x doom/reload
 (map! :leader :desc "Split window right" "w/" (lambda () (interactive) (split-window-right) (other-window 1)))
 #+END_SRC
 
-#+RESULTS:
-| lambda | nil | (interactive) | (split-window-right) | (other-window 1) |
 ** Jump binding
 #+BEGIN_SRC emacs-lisp
 (map! :leader :desc "jump" "j" nil)
