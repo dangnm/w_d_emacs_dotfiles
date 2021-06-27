@@ -1,6 +1,2 @@
-## Setup Emacs dotfiles
-    ln -sf ~/w_d_emacs_dotfiles/config.org ~/.doom.d/config.org
-## Enable org file config
-    Go to ~/.doom.d/init.el and uncomment literate
-## Rebuild config
-    SPC h r r OR M-x doom/reload
+## Org mode config file
+  Click [here](https://github.com/dangnm/w_d_emacs_dotfiles/blob/main/config.org "Org mode config file")
