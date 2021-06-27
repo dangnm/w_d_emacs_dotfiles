@@ -110,14 +110,14 @@ SPC h r r OR M-x doom/reload
    : toggle-camelcase-motion
 
 * Key bindings
-** Windows
+** Windows binding
 #+BEGIN_SRC emacs-lisp
 (map! :leader :desc "Split window right" "w/" (lambda () (interactive) (split-window-right) (other-window 1)))
 #+END_SRC
 
 #+RESULTS:
 | lambda | nil | (interactive) | (split-window-right) | (other-window 1) |
-** Jump
+** Jump binding
 #+BEGIN_SRC emacs-lisp
 (map! :leader :desc "jump" "j" nil)
 (map! :leader :desc "go to word" "jw" #'evil-avy-goto-word-or-subword-1)
