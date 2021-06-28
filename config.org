@@ -5,9 +5,6 @@ ln -sf ~/w_d_emacs_dotfiles/config.org ~/.doom.d/config.org
 Go to ~/.doom.d/init.el and uncomment literate
 ** Rebuild config
 SPC h r r OR M-x doom/reload
-
-
-*
 * Tips
 ** Check all bindings
 SPC h b b runs counsel-descbinds and will show all defined keys and their definitions.
