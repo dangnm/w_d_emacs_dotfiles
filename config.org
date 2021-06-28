@@ -1,3 +1,33 @@
+#+TITLE: Doom Emacs dotfiles
+* Table of contents                                               :TOC:QUOTE:
+#+BEGIN_QUOTE
+- [[#installation][Installation]]
+  - [[#setup-emacs-dotfiles][Setup Emacs dotfiles]]
+  - [[#enable-org-file-config][Enable org file config]]
+  - [[#rebuild-config][Rebuild config]]
+- [[#tips][Tips]]
+  - [[#check-all-bindings][Check all bindings]]
+- [[#helpers][Helpers]]
+  - [[#basic-helpers][Basic helpers]]
+  - [[#file-path-helpers][File path helpers]]
+  - [[#file-path-helpers-1][File path helpers]]
+  - [[#text-edit-helpers][Text edit helpers]]
+- [[#key-bindings][Key bindings]]
+  - [[#commons][Commons]]
+  - [[#other-custom-mappings][Other custom mappings]]
+  - [[#windows-binding][Windows binding]]
+  - [[#jump-binding][Jump binding]]
+  - [[#register-binding][Register binding]]
+  - [[#git-binding][Git binding]]
+  - [[#layouts][Layouts]]
+  - [[#m-x-command][M-x command]]
+  - [[#dired-secondary-leader-key][Dired secondary leader key]]
+- [[#my-git-tools-config][My git tools config]]
+  - [[#magit-config][Magit config]]
+- [[#other-tools-configs][Other tools configs]]
+  - [[#workspace-persp-mode-config][Workspace (PERSP MODE) config]]
+#+END_QUOTE
+
 * Installation
 ** Setup Emacs dotfiles
 ln -sf ~/w_d_emacs_dotfiles/config.org ~/.doom.d/config.org
