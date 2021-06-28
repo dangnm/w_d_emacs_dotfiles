@@ -243,10 +243,23 @@ SPC h b b runs counsel-descbinds and will show all defined keys and their defini
     ))
  ((string-equal system-type "darwin") ;  macOS
   (progn
-    (message "Mac OS X")))
+    (message "Mac OS X")
+    (setq doom-font (font-spec :family "Source Code Pro-16" :size 24)
+          doom-big-font (font-spec :family "Source Code Pro-16" :size 36)
+          doom-variable-pitch-font (font-spec :family "Source Code Pro-16" :size 24)
+          doom-unicode-font (font-spec :family "Source Code Pro-16")
+          doom-serif-font (font-spec :family "Source Code Pro-16" :weight 'light))
+    ))
  ((string-equal system-type "gnu/linux")
   (progn
-    (message "Linux"))))
+    (message "Linux")
+    (setq doom-font (font-spec :family "monospace" :size 24)
+          doom-big-font (font-spec :family "monospace" :size 36)
+          doom-variable-pitch-font (font-spec :family "sans" :size 24)
+          doom-unicode-font (font-spec :family "monospace")
+          doom-serif-font (font-spec :family "monospace" :weight 'light))
+    ))
+ )
 #+END_SRC
 ** Clipboard config
 #+BEGIN_SRC emacs-lisp
