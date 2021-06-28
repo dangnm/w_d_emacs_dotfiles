@@ -230,6 +230,8 @@ SPC h b b runs counsel-descbinds and will show all defined keys and their defini
 
 * Setup editor config
 ** Font config
+List available fonts ~(print (font-family-list))~
+
 #+BEGIN_SRC emacs-lisp
 (cond
  ((string-equal system-type "windows-nt")
