@@ -12,6 +12,86 @@ SPC h r r OR M-x doom/reload
 ** Check all bindings
 SPC h b b runs counsel-descbinds and will show all defined keys and their definitions.
 * Helpers
+** Basic helpers
+   #+BEGIN_SRC emacs-lisp
+     (defun create-shell ()
+       "creates a shell with a given name"
+       (interactive);; "Prompt\n shell name:")
+       (let ((shell-name (read-string "shell name: " nil)))
+         (shell (concat "*" shell-name "*"))))
+
+     (defun create-shell-with-name (name)
+       (shell (concat "*" name "*")))
+                                             ; Folding
+     (defun toggle-selective-display (column)
+       (interactive "P")
+       (set-selective-display
+        (or column
+            (unless selective-display
+              (1+ (current-column))))))
+
+   #+END_SRC
+** File path helpers
+   #+BEGIN_SRC emacs-lisp
+     (defun s/show-buffer-file-path ()
+       "Show the full path to the current file in the minibuffer."
+       (interactive)
+       (let ((file-name (buffer-file-name)))
+         (if file-name
+             (progn
+               (message file-name)
+               (kill-new file-name))
+           (error "Buffer not visiting a file"))))
+
+     (defun w/show-buffer-project-path ()
+       "Show the full path to the current project in the minibuffer."
+       (interactive)
+       (let ((project-path (projectile-project-root)))
+         (if project-path
+             (progn
+               (message project-path)
+               (kill-new project-path))
+           (error "Buffer not visiting a project"))))
+
+     (defun s/show-buffer-file-name ()
+       "Show the full path to the current file in the minibuffer."
+       (interactive)
+       (let ((file-name (file-name-nondirectory(buffer-file-name))))
+         (if file-name
+             (progn
+               (message file-name)
+               (kill-new file-name))
+           (error "Buffer not visiting a file"))))
+
+     (defun w/show-buffer-file-name-base ()
+       "Show current file name base in the minibuffer."
+       (interactive)
+       (let ((file-name (file-name-base(buffer-file-name))))
+         (if file-name
+             (progn
+               (message file-name)
+               (kill-new file-name))
+           (error "Buffer not visiting a file"))))
+
+     (defun w/file-path-with-line ()
+       "Retrieve the file path of the current buffer, including line number.
+
+     Returns:
+       - A string containing the file path in case of success.
+       - `nil' in case the current buffer does not have a directory."
+       (when-let (file-path (buffer-file-name))
+         (concat file-path ":" (number-to-string (line-number-at-pos)))))
+
+     (defun w/show-buffer-file-path-with-line ()
+       "Show current file name base in the minibuffer."
+       (interactive)
+       (let ((file-name (w/file-path-with-line)))
+         (if file-name
+             (progn
+               (message file-name)
+               (kill-new file-name))
+           (error "Buffer not visiting a file"))))
+   #+END_SRC
 ** File path helpers
    #+BEGIN_SRC emacs-lisp
      (defun s/show-buffer-file-path ()
@@ -113,9 +193,26 @@ SPC h b b runs counsel-descbinds and will show all defined keys and their defini
 #+BEGIN_SRC emacs-lisp
 (setq w/secondary-leader-key ",")
 #+END_SRC
+** Other custom mappings
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Other cutom mappings" "h," nil)
+
+(map! :leader :desc "Text" "h,x" nil)
+(map! :leader :desc "Upcase region" "h,xU" #'upcase-region)
+(map! :leader :desc "Downcase region" "h,xu" #'downcase-region)
+(map! :leader :desc "Toggle camelcase undersores" "h,xs" #'toggle-camelcase-underscores)
+(map! :leader :desc "Delete" "h,xd" nil)
+(map! :leader :desc "delete trailing whitespace" "h,xdw" #'delete-trailing-whitespace)
+
+
+(map! :leader :desc "Zoom" "h,z" nil)
+(map! :leader :desc "Togle selective display" "h,zc" #'toggle-selective-display)
+#+END_SRC
+
 ** Windows binding
 #+BEGIN_SRC emacs-lisp
 (map! :leader :desc "Split window right" "w/" (lambda () (interactive) (split-window-right) (other-window 1)))
+(map! :leader :desc "Toggle frame maximized" "w C-m" #'toggle-frame-maximized)
 #+END_SRC
 
 ** Jump binding
@@ -128,13 +225,27 @@ SPC h b b runs counsel-descbinds and will show all defined keys and their defini
 (map! :leader :desc "go to word" "jw" #'evil-avy-goto-word-or-subword-1)
 #+END_SRC
 
+** Register binding
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Registers" "r" nil)
+(map! :leader :desc "Jump to register" "rj" #'jump-to-register)
+(map! :leader :desc "Write to register" "rw" #'window-configuration-to-register)
+(map! :leader :desc "helm resume" "rl" #'helm-resume)
+#+END_SRC
+
 #+RESULTS:
-: evil-avy-goto-word-or-subword-1
+: helm-resume
 
 ** Git binding
 #+BEGIN_SRC emacs-lisp
-(map! :leader :desc "Git link" "gll" #'git-link)
+(map! :leader :desc "Custom mapping" "g," nil)
+(map! :leader :desc "Git link" "g,l" #'+vc/browse-at-remote-kill)
+(map! :leader :desc "Last commit message" "g,y" #'w/git-last-commit-message)
+(map! :leader :desc "Time machine" "gt" #'w/git-timemachine-on)
 #+END_SRC
+
+#+RESULTS:
+: w/git-timemachine-on
 
 ** Layouts
 #+BEGIN_SRC emacs-lisp
@@ -218,6 +329,92 @@ SPC h b b runs counsel-descbinds and will show all defined keys and their defini
          (message
           (format "%d file/dir(s) pasted into current directory." (length stored-file-list)))))
 #+END_SRC
+
+* My git tools config
+** Magit config
+#+BEGIN_SRC emacs-lisp
+     (use-package hydra
+       :ensure t
+       :defer t
+       )
+
+     (use-package git-timemachine
+       :commands (git-timemachine)
+       :config
+
+       (defun git-timemachine-blame ()
+         "Call magit-blame on current revision."
+         (interactive)
+         (if (fboundp 'magit-blame)
+             (let ((magit-buffer-revision (car git-timemachine-revision)))
+               (magit-blame))
+           (message "You need to install magit for blame capabilities")))
+
+       (defun git-timemachine-find-revision-by-id (revision-id)
+         (require 'cl)
+         (message revision-id)
+         (cl-loop for v in (git-timemachine--revisions)
+                  until (cl-search revision-id (nth 0 v))
+                  finally return v
+                  )
+         )
+       (defun git-timemachine-go-to-revision-id (revision-id)
+         (interactive "sEnter revision id: ")
+         (git-timemachine-show-revision (git-timemachine-find-revision-by-id revision-id))
+         )
+       (evil-define-key 'normal git-timemachine-mode-map (kbd "G") 'git-timemachine-go-to-revision-id)
+       )
+
+     (defun w/git-timemachine-on ()
+       (interactive)
+       (git-timemachine)
+       (w/git-timemachine-hydra/body))
+
+
+     (defhydra w/git-timemachine-hydra
+       (:color pink :hint nil :exit t)
+       ("n" git-timemachine-show-next-revision "Next Revision" :column "Go to")
+       ("p" git-timemachine-show-previous-revision "Next Revision")
+       ("c" git-timemachine-show-current-revision "Current Revision")
+       ("g" git-timemachine-show-nth-revision "Nth Revision")
+       ("t" git-timemachine-show-revision-fuzzy "Search")
+       ("W" git-timemachine-kill-revision "Copy full revision" :column "Actions")
+       ("w" git-timemachine-kill-abbreviated-revision "Copy abbreviated revision" :column "Actions")
+       ("C" git-timemachine-show-commit "Show commit")
+       ("b" git-timemachine-blame "Blame")
+       ("G" git-timemachine-go-to-revision-id "Revision Id")
+       ("q" nil "cancel" :color blue :column nil))
+                                             ;indicating inserted, modified or deleted lines
+     (use-package diff-hl
+       :ensure t
+       :commands (diff-hl-mode)
+       :config
+       (diff-hl-margin-mode)
+       (setq diff-hl-margin-side 'right)
+       )
+                                             ;Init git modified highlighting at programming mode
+     (add-hook 'prog-mode-hook
+               (lambda()
+                 (diff-hl-mode t)
+                 )
+               )
+
+     (eval-after-load 'git-timemachine
+       '(progn
+          (evil-make-overriding-map git-timemachine-mode-map 'normal)
+          ;; force update evil keymaps after git-timemachine-mode loaded
+          (add-hook 'git-timemachine-mode-hook #'evil-normalize-keymaps)))
+
+     (defun w/git-last-commit-message ()
+       (interactive)
+       (let ((git-message (shell-command-to-string "git log -1 --pretty=%B 2>/dev/null")))
+         (kill-new git-message)
+         )
+       )
+#+END_SRC
+
+#+RESULTS:
+: w/git-last-commit-message
 
 * Other tools configs
 ** Workspace (PERSP MODE) config
