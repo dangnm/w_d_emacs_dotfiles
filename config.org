@@ -233,6 +233,12 @@ SPC h b b runs counsel-descbinds and will show all defined keys and their defini
 List available fonts ~(print (font-family-list))~
 
 #+BEGIN_SRC emacs-lisp
+(defun w/font-exists-p (font)
+  "check if font exists"
+  (let ((font-list (or (font-family-list) (fc-list))))
+    (if (member font font-list)
+        t
+      nil)))
 (cond
  ((string-equal system-type "windows-nt")
   (progn
@@ -246,20 +252,24 @@ List available fonts ~(print (font-family-list))~
  ((string-equal system-type "darwin") ;  macOS
   (progn
     (message "Mac OS X")
-    (setq doom-font (font-spec :family "Menlo" :size 16)
-          doom-big-font (font-spec :family "Menlo" :size 36)
-          doom-variable-pitch-font (font-spec :family "Menlo" :size 24)
-          doom-unicode-font (font-spec :family "Menlo")
-          doom-serif-font (font-spec :family "Menlo" :weight 'light))
+    (if (w/font-exists-p "Menlo")
+        (setq doom-font (font-spec :family "Menlo" :size 16)
+              doom-big-font (font-spec :family "Menlo" :size 36)
+              doom-variable-pitch-font (font-spec :family "Menlo" :size 24)
+              doom-unicode-font (font-spec :family "Menlo")
+              doom-serif-font (font-spec :family "Menlo" :weight 'light))
+      )
     ))
  ((string-equal system-type "gnu/linux")
   (progn
     (message "Linux")
-    (setq doom-font (font-spec :family "monospace" :size 16)
-          doom-big-font (font-spec :family "monospace" :size 36)
-          doom-variable-pitch-font (font-spec :family "sans" :size 24)
-          doom-unicode-font (font-spec :family "monospace")
-          doom-serif-font (font-spec :family "monospace" :weight 'light))
+    (if (w/font-exists-p "monospace")
+        (setq doom-font (font-spec :family "monospace" :size 16)
+              doom-big-font (font-spec :family "monospace" :size 36)
+              doom-variable-pitch-font (font-spec :family "sans" :size 24)
+              doom-unicode-font (font-spec :family "monospace")
+              doom-serif-font (font-spec :family "monospace" :weight 'light))
+      )
     ))
  )
 #+END_SRC
