@@ -12,6 +12,7 @@
   - [[#file-path-helpers][File path helpers]]
   - [[#file-path-helpers-1][File path helpers]]
   - [[#text-edit-helpers][Text edit helpers]]
+- [[#setup-editor-config][Setup editor config]]
 - [[#key-bindings][Key bindings]]
   - [[#commons][Commons]]
   - [[#other-custom-mappings][Other custom mappings]]
@@ -215,6 +216,14 @@ SPC h b b runs counsel-descbinds and will show all defined keys and their defini
        )
    #+END_SRC
 
+* Setup editor config
+#+BEGIN_SRC emacs-lisp
+(setq doom-font (font-spec :family "monospace" :size 24)
+      doom-big-font (font-spec :family "monospace" :size 36)
+      doom-variable-pitch-font (font-spec :family "sans" :size 24)
+      doom-unicode-font (font-spec :family "monospace")
+      doom-serif-font (font-spec :family "monospace" :weight 'light))
+#+END_SRC
 * Key bindings
 ** Commons
 #+BEGIN_SRC emacs-lisp
