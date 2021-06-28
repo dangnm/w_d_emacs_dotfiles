@@ -6,6 +6,11 @@ Go to ~/.doom.d/init.el and uncomment literate
 ** Rebuild config
 SPC h r r OR M-x doom/reload
 
+
+*
+* Tips
+** Check all bindings
+SPC h b b runs counsel-descbinds and will show all defined keys and their definitions.
 * Helpers
 ** File path helpers
    #+BEGIN_SRC emacs-lisp
@@ -69,9 +74,6 @@ SPC h r r OR M-x doom/reload
            (error "Buffer not visiting a file"))))
    #+END_SRC
 
-   #+RESULTS:
-   : w/show-buffer-file-path-with-line
-
 ** Text edit helpers
    #+BEGIN_SRC emacs-lisp
      (defun toggle-camelcase-underscores ()
@@ -106,9 +108,6 @@ SPC h r r OR M-x doom/reload
        )
    #+END_SRC
 
-   #+RESULTS:
-   : toggle-camelcase-motion
-
 * Key bindings
 ** Commons
 #+BEGIN_SRC emacs-lisp
@@ -127,6 +126,19 @@ SPC h r r OR M-x doom/reload
 (map! :leader :desc "go to char 2" "jJ" #'evil-avy-goto-char-2)
 (map! :leader :desc "goto line" "jl" #'evil-avy-goto-line)
 (map! :leader :desc "go to word" "jw" #'evil-avy-goto-word-or-subword-1)
+#+END_SRC
+
+#+RESULTS:
+: evil-avy-goto-word-or-subword-1
+
+** Git binding
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Git link" "gll" #'git-link)
+#+END_SRC
+
+** Layouts
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Persp select" "l" #'w/persp-hydra/body)
 #+END_SRC
 
 ** M-x command
@@ -206,3 +218,95 @@ SPC h r r OR M-x doom/reload
          (message
           (format "%d file/dir(s) pasted into current directory." (length stored-file-list)))))
 #+END_SRC
+
+* Other tools configs
+** Workspace (PERSP MODE) config
+save/recover sessions
+#+BEGIN_SRC emacs-lisp
+     (defun w/ivy-persp-switch-project (arg)
+       (interactive "P")
+       (persp-mode)
+       (helm-projectile-configs-load)
+       (ivy-mode)
+       (define-key ivy-minibuffer-map (kbd "C-j") 'ivy-next-line)
+       (define-key ivy-minibuffer-map (kbd "C-k") 'ivy-previous-line)
+       (ivy-read "Switch to Project Perspective: "
+                 (if (projectile-project-p)
+                     (cons (abbreviate-file-name (projectile-project-root))
+                           (projectile-relevant-known-projects))
+                   projectile-known-projects)
+                 :action (lambda (project)
+                           (let* ((persp-reset-windows-on-nil-window-conf t)
+                                  (exists (persp-with-name-exists-p project)))
+                             (persp-switch project)
+                             (unless exists
+                               (progn
+                                 (let ((projectile-completion-system 'ivy))
+                                   (projectile-switch-project-by-name project))))))))
+
+     ;; perspectives for emacs
+     (defun w/persp-load-state-from-file ()
+       (interactive)
+       (persp-mode 1)
+       (call-interactively 'persp-load-state-from-file)
+       )
+
+     (defun w/persp-save-state-to-file ()
+       (interactive)
+       (persp-mode 1)
+       (call-interactively 'persp-save-state-to-file)
+       )
+
+     (use-package persp-mode
+       :commands (persp-mode)
+       :init
+       (setq wg-morph-on nil ;; switch off animation
+             persp-add-buffer-on-after-change-major-mode t
+             persp-auto-resume-time -1
+             persp-autokill-buffer-on-remove 'kill-weak
+             persp-save-dir (expand-file-name "~/.emacs.d/.cache/layouts/"))
+       )
+
+     (defun w/persp-layout ()
+       "Switch to perspective of position POS."
+       (interactive)
+       (let* ((persp-current-name (safe-persp-name (get-current-persp)))
+              (highlight-persps (lambda (elt idx)
+                                  (format (if (string= elt persp-current-name) "%d *%s*" "%d %s")
+                                          (+ idx 1)
+                                          (if (string= elt "none") elt (f-base elt))))))
+         (string-join (seq-map-indexed highlight-persps (persp-names-current-frame-fast-ordered)) " | ")))
+
+
+     (defun w/persp-switch-to-number(number)
+       (persp-switch (nth (1+ (- number 2)) (persp-names-current-frame-fast-ordered)))
+       )
+
+     (use-package hydra
+       :ensure t
+       :defer t
+       )
+
+     (defhydra w/persp-hydra
+       (:color pink :hint nil :exit t)
+       "Layout: %s(w/persp-layout)"
+       ("n" persp-next "Next Layout" :column "Go to")
+       ("p" persp-prev "Prev Layout")
+       ("l" persp-switch "Switch Layout")
+       ("1" (w/persp-switch-to-number 1))
+       ("2" (w/persp-switch-to-number 2))
+       ("3" (w/persp-switch-to-number 3))
+       ("4" (w/persp-switch-to-number 4))
+       ("5" (w/persp-switch-to-number 5))
+       ("6" (w/persp-switch-to-number 6))
+       ("7" (w/persp-switch-to-number 7))
+       ("8" (w/persp-switch-to-number 8))
+       ("9" (w/persp-switch-to-number 9))
+
+       ("d" persp-kill :column "Actions")
+       ("r" persp-rename)
+       ("s" w/persp-save-state-to-file "Save Layout")
+       ("L" w/persp-load-state-from-file "Load Layout")
+       ("q" nil "cancel" :color blue :column nil))
+
+   #+END_SRC
