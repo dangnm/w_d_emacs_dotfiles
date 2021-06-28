@@ -13,6 +13,8 @@
   - [[#file-path-helpers-1][File path helpers]]
   - [[#text-edit-helpers][Text edit helpers]]
 - [[#setup-editor-config][Setup editor config]]
+  - [[#font-config][Font config]]
+  - [[#clipboard-config][Clipboard config]]
 - [[#key-bindings][Key bindings]]
   - [[#commons][Commons]]
   - [[#other-custom-mappings][Other custom mappings]]
@@ -227,12 +229,34 @@ SPC h b b runs counsel-descbinds and will show all defined keys and their defini
    #+END_SRC
 
 * Setup editor config
+** Font config
 #+BEGIN_SRC emacs-lisp
-(setq doom-font (font-spec :family "monospace" :size 24)
-      doom-big-font (font-spec :family "monospace" :size 36)
-      doom-variable-pitch-font (font-spec :family "sans" :size 24)
-      doom-unicode-font (font-spec :family "monospace")
-      doom-serif-font (font-spec :family "monospace" :weight 'light))
+(cond
+ ((string-equal system-type "windows-nt")
+  (progn
+    (message "Microsoft Windows")
+    (setq doom-font (font-spec :family "monospace" :size 24)
+          doom-big-font (font-spec :family "monospace" :size 36)
+          doom-variable-pitch-font (font-spec :family "sans" :size 24)
+          doom-unicode-font (font-spec :family "monospace")
+          doom-serif-font (font-spec :family "monospace" :weight 'light))
+    ))
+ ((string-equal system-type "darwin") ;  macOS
+  (progn
+    (message "Mac OS X")))
+ ((string-equal system-type "gnu/linux")
+  (progn
+    (message "Linux"))))
+#+END_SRC
+** Clipboard config
+#+BEGIN_SRC emacs-lisp
+  (if (not(display-graphic-p))
+      (progn
+        (osx-clipboard-mode +1)
+        (setq x-select-enable-clipboard t)
+        (setq x-select-enable-primary t)
+        )
+    )
 #+END_SRC
 * Key bindings
 ** Commons
