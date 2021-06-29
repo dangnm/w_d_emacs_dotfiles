@@ -379,9 +379,6 @@ List available fonts ~(print (font-family-list))~
 (map! :leader :desc "helm resume" "rl" #'helm-resume)
 #+END_SRC
 
-#+RESULTS:
-: helm-resume
-
 ** Git binding
 #+BEGIN_SRC emacs-lisp
 (map! :leader :desc "Custom mapping" "g," nil)
@@ -389,9 +386,6 @@ List available fonts ~(print (font-family-list))~
 (map! :leader :desc "Last commit message" "g,y" #'w/git-last-commit-message)
 (map! :leader :desc "Time machine" "gt" #'w/git-timemachine-on)
 #+END_SRC
-
-#+RESULTS:
-: w/git-timemachine-on
 
 ** Layouts
 #+BEGIN_SRC emacs-lisp
@@ -490,7 +484,7 @@ The compatibility of system clipboard
 * My search config
 ** Fzf search config
    #+BEGIN_SRC emacs-lisp
-     (when (memq window-system '(mac ns))
+     (when (memq window-system '(mac ns x))
        (setenv "PATH" (concat (getenv "PATH") ":~/.fzf/bin"))
        (setq exec-path (append exec-path '(":~/.fzf/bin"))))
      (setq fzf-path (format "%s/packages/fzf.el" w-dotfiles-folder-path))
@@ -581,9 +575,6 @@ The compatibility of system clipboard
          )
        )
 #+END_SRC
-
-#+RESULTS:
-: w/git-last-commit-message
 
 * Other tools configs
 ** Workspace (PERSP MODE) config
