@@ -16,8 +16,9 @@
   - [[#font-config][Font config]]
   - [[#clipboard-config][Clipboard config]]
 - [[#key-bindings][Key bindings]]
-  - [[#commons][Commons]]
+  - [[#commons-bindings][Commons bindings]]
   - [[#other-custom-mappings][Other custom mappings]]
+  - [[#search-binding][Search binding]]
   - [[#windows-binding][Windows binding]]
   - [[#jump-binding][Jump binding]]
   - [[#register-binding][Register binding]]
@@ -26,6 +27,8 @@
   - [[#m-x-command][M-x command]]
   - [[#clipboard-bindings][Clipboard bindings]]
   - [[#dired-secondary-leader-key][Dired secondary leader key]]
+- [[#my-search-config][My search config]]
+  - [[#fzf-search-config][Fzf search config]]
 - [[#my-git-tools-config][My git tools config]]
   - [[#magit-config][Magit config]]
 - [[#other-tools-configs][Other tools configs]]
@@ -74,6 +77,17 @@ SPC h b b runs counsel-descbinds and will show all defined keys and their defini
    #+END_SRC
 ** File path helpers
    #+BEGIN_SRC emacs-lisp
+     ;Init file paths
+     (defun w/dotfiles-folder-path ()
+       (let ((path1 (replace-regexp-in-string  "\n\+$" "" (shell-command-to-string "dirname $(readlink ~/.doom.d/config.org) 2>/dev/null"))))
+         (if (not(string= "" path1))
+           path1
+           (replace-regexp-in-string  "\n\+$" "" (shell-command-to-string "readlink ~/.doom.d 2>/dev/null"))
+           )
+         )
+       )
+     (setq w-dotfiles-folder-path (w/dotfiles-folder-path))
+     (setq w-dotfiles-pakages-folder-path (format "%s/packages" w-dotfiles-folder-path))
      (defun s/show-buffer-file-path ()
        "Show the full path to the current file in the minibuffer."
        (interactive)
@@ -314,8 +328,9 @@ List available fonts ~(print (font-family-list))~
   )
 #+END_SRC
 * Key bindings
-** Commons
+** Commons bindings
 #+BEGIN_SRC emacs-lisp
+(setq w/main-leader-key "SPC")
 (setq w/secondary-leader-key ",")
 #+END_SRC
 ** Other custom mappings
@@ -332,6 +347,11 @@ List available fonts ~(print (font-family-list))~
 
 (map! :leader :desc "Zoom" "h,z" nil)
 (map! :leader :desc "Togle selective display" "h,zc" #'toggle-selective-display)
+#+END_SRC
+
+** Search binding
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "szf" "szf" #'counsel-fzf)
 #+END_SRC
 
 ** Windows binding
@@ -466,6 +486,18 @@ The compatibility of system clipboard
          (message
           (format "%d file/dir(s) pasted into current directory." (length stored-file-list)))))
 #+END_SRC
+
+* My search config
+** Fzf search config
+   #+BEGIN_SRC emacs-lisp
+     (when (memq window-system '(mac ns))
+       (setenv "PATH" (concat (getenv "PATH") ":~/.fzf/bin"))
+       (setq exec-path (append exec-path '(":~/.fzf/bin"))))
+     (setq fzf-path (format "%s/packages/fzf.el" w-dotfiles-folder-path))
+     (use-package fzf
+       :commands fzf
+       :load-path fzf-path)
+   #+END_SRC
 
 * My git tools config
 ** Magit config
