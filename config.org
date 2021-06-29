@@ -24,6 +24,7 @@
   - [[#git-binding][Git binding]]
   - [[#layouts][Layouts]]
   - [[#m-x-command][M-x command]]
+  - [[#clipboard-bindings][Clipboard bindings]]
   - [[#dired-secondary-leader-key][Dired secondary leader key]]
 - [[#my-git-tools-config][My git tools config]]
   - [[#magit-config][Magit config]]
@@ -284,7 +285,7 @@ List available fonts ~(print (font-family-list))~
       )
   )
 ;; Copy/past to system clipboard
-(defun copy-to-clipboard ()
+(defun w/copy-to-clipboard ()
   "Copies selection to x-clipboard."
   (interactive)
   (if (display-graphic-p)
@@ -300,7 +301,7 @@ List available fonts ~(print (font-family-list))~
       (message "No region active; can't yank to clipboard!")))
   )
 
-(defun paste-from-clipboard ()
+(defun w/paste-from-clipboard ()
   "Pastes from x-clipboard."
   (interactive)
   (if (display-graphic-p)
@@ -311,12 +312,6 @@ List available fonts ~(print (font-family-list))~
     (insert (shell-command-to-string "xsel -o -b"))
     )
   )
-(map! :leader
-      :desc "copy-to-clipboard"
-      "o y" #'copy-to-clipboard)
-(map! :leader
-      :desc "paste-from-clipboard"
-      "o p" #'paste-from-clipboard)
 #+END_SRC
 * Key bindings
 ** Commons
@@ -386,6 +381,17 @@ List available fonts ~(print (font-family-list))~
 ** M-x command
 #+BEGIN_SRC emacs-lisp
 (map! :leader :desc "M-x command" "SPC" #'counsel-M-x)
+#+END_SRC
+
+** Clipboard bindings
+The compatibility of system clipboard
+#+BEGIN_SRC emacs-lisp
+(map! :leader
+      :desc "copy-to-clipboard"
+      "o y" #'w/copy-to-clipboard)
+(map! :leader
+      :desc "paste-from-clipboard"
+      "o p" #'w/paste-from-clipboard)
 #+END_SRC
 
 ** Dired secondary leader key
