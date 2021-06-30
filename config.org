@@ -2,11 +2,10 @@
 * Table of contents                                               :TOC:QUOTE:
 #+BEGIN_QUOTE
 - [[#installation][Installation]]
+  - [[#install-doom-emacs][Install Doom Emacs]]
   - [[#setup-emacs-dotfiles][Setup Emacs dotfiles]]
   - [[#enable-org-file-config][Enable org file config]]
   - [[#rebuild-config][Rebuild config]]
-- [[#tips][Tips]]
-  - [[#check-all-bindings][Check all bindings]]
 - [[#helpers][Helpers]]
   - [[#basic-helpers][Basic helpers]]
   - [[#file-path-helpers][File path helpers]]
@@ -33,18 +32,21 @@
   - [[#magit-config][Magit config]]
 - [[#other-tools-configs][Other tools configs]]
   - [[#workspace-persp-mode-config][Workspace (PERSP MODE) config]]
+- [[#tips][Tips]]
+  - [[#check-all-bindings][Check all bindings]]
+  - [[#org-mode-basic-bindings][Org mode basic bindings]]
 #+END_QUOTE
 
 * Installation
+** Install Doom Emacs
+Click [[https://github.com/hlissner/doom-emacs#install][here]] to install Doom Emacs if it's not ready in the target environment
 ** Setup Emacs dotfiles
 ln -sf ~/w_d_emacs_dotfiles/config.org ~/.doom.d/config.org
 ** Enable org file config
 Go to ~/.doom.d/init.el and uncomment literate
 ** Rebuild config
-SPC h r r OR M-x doom/reload
-* Tips
-** Check all bindings
-SPC h b b runs counsel-descbinds and will show all defined keys and their definitions.
+Run ~SPC h r r~ OR ~M-x doom/reload~ to re-apply configurations from config.org
+Run ~doom env~ to re-apply env vars for Doom Emacs
 * Helpers
 ** Basic helpers
    #+BEGIN_SRC emacs-lisp
@@ -668,3 +670,11 @@ save/recover sessions
        ("q" nil "cancel" :color blue :column nil))
 
    #+END_SRC
+* Tips
+** Check all bindings
+SPC h b b runs counsel-descbinds and will show all defined keys and their definitions.
+** Org mode basic bindings
+- Use ~Shift Tab~ to fold or unfold all headlines
+- Use ~zc~ or ~zo~ on headlines to fold or unfold headlines
+- Use ~Ctrl C Ctrl C~ to execute code
+- Use ~Ctrl C '~ to toggle code's edit mode
