@@ -9,7 +9,6 @@
 - [[#helpers][Helpers]]
   - [[#basic-helpers][Basic helpers]]
   - [[#file-path-helpers][File path helpers]]
-  - [[#file-path-helpers-1][File path helpers]]
   - [[#text-edit-helpers][Text edit helpers]]
 - [[#setup-editor-config][Setup editor config]]
   - [[#font-config][Font config]]
@@ -45,8 +44,8 @@ ln -sf ~/w_d_emacs_dotfiles/config.org ~/.doom.d/config.org
 ** Enable org file config
 Go to ~/.doom.d/init.el and uncomment literate
 ** Rebuild config
-Run ~SPC h r r~ OR ~M-x doom/reload~ to re-apply configurations from config.org
-Run ~doom env~ to re-apply env vars for Doom Emacs
+- Run ~SPC h r r~ OR ~M-x doom/reload~ to re-apply configurations from config.org
+- Run ~doom env~ to re-apply env vars for Doom Emacs
 * Helpers
 ** Basic helpers
    #+BEGIN_SRC emacs-lisp
@@ -90,67 +89,6 @@ Run ~doom env~ to re-apply env vars for Doom Emacs
        )
      (setq w-dotfiles-folder-path (w/dotfiles-folder-path))
      (setq w-dotfiles-pakages-folder-path (format "%s/packages" w-dotfiles-folder-path))
-     (defun s/show-buffer-file-path ()
-       "Show the full path to the current file in the minibuffer."
-       (interactive)
-       (let ((file-name (buffer-file-name)))
-         (if file-name
-             (progn
-               (message file-name)
-               (kill-new file-name))
-           (error "Buffer not visiting a file"))))
-
-     (defun w/show-buffer-project-path ()
-       "Show the full path to the current project in the minibuffer."
-       (interactive)
-       (let ((project-path (projectile-project-root)))
-         (if project-path
-             (progn
-               (message project-path)
-               (kill-new project-path))
-           (error "Buffer not visiting a project"))))
-
-     (defun s/show-buffer-file-name ()
-       "Show the full path to the current file in the minibuffer."
-       (interactive)
-       (let ((file-name (file-name-nondirectory(buffer-file-name))))
-         (if file-name
-             (progn
-               (message file-name)
-               (kill-new file-name))
-           (error "Buffer not visiting a file"))))
-
-     (defun w/show-buffer-file-name-base ()
-       "Show current file name base in the minibuffer."
-       (interactive)
-       (let ((file-name (file-name-base(buffer-file-name))))
-         (if file-name
-             (progn
-               (message file-name)
-               (kill-new file-name))
-           (error "Buffer not visiting a file"))))
-
-     (defun w/file-path-with-line ()
-       "Retrieve the file path of the current buffer, including line number.
-
-     Returns:
-       - A string containing the file path in case of success.
-       - `nil' in case the current buffer does not have a directory."
-       (when-let (file-path (buffer-file-name))
-         (concat file-path ":" (number-to-string (line-number-at-pos)))))
-
-     (defun w/show-buffer-file-path-with-line ()
-       "Show current file name base in the minibuffer."
-       (interactive)
-       (let ((file-name (w/file-path-with-line)))
-         (if file-name
-             (progn
-               (message file-name)
-               (kill-new file-name))
-           (error "Buffer not visiting a file"))))
-   #+END_SRC
-** File path helpers
-   #+BEGIN_SRC emacs-lisp
      (defun s/show-buffer-file-path ()
        "Show the full path to the current file in the minibuffer."
        (interactive)
