@@ -483,8 +483,9 @@ The compatibility of system clipboard
 
 * My search config
 ** Fzf search config
+   run ~doom env~ to load fzf path
    #+BEGIN_SRC emacs-lisp
-     (when (memq window-system '(mac ns x))
+     (when (memq window-system '(mac ns))
        (setenv "PATH" (concat (getenv "PATH") ":~/.fzf/bin"))
        (setq exec-path (append exec-path '(":~/.fzf/bin"))))
      (setq fzf-path (format "%s/packages/fzf.el" w-dotfiles-folder-path))
