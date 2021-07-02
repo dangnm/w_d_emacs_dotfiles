@@ -16,8 +16,9 @@
   - [[#clipboard-config][Clipboard config]]
 - [[#key-bindings][Key bindings]]
   - [[#commons-bindings][Commons bindings]]
-  - [[#other-custom-mappings][Other custom mappings]]
-  - [[#search-binding][Search binding]]
+  - [[#other-custom-bindings][Other custom bindings]]
+  - [[#file-bindings][File bindings]]
+  - [[#search-bindings][Search bindings]]
   - [[#windows-binding][Windows binding]]
   - [[#jump-binding][Jump binding]]
   - [[#register-binding][Register binding]]
@@ -27,6 +28,7 @@
   - [[#clipboard-bindings][Clipboard bindings]]
   - [[#dired-secondary-leader-key][Dired secondary leader key]]
 - [[#my-search-config][My search config]]
+  - [[#helm-config][Helm config]]
   - [[#fzf-search-config][Fzf search config]]
 - [[#my-git-tools-config][My git tools config]]
   - [[#magit-config][Magit config]]
@@ -276,7 +278,7 @@ List available fonts ~(print (font-family-list))~
 (setq w/main-leader-key "SPC")
 (setq w/secondary-leader-key ",")
 #+END_SRC
-** Other custom mappings
+** Other custom bindings
 #+BEGIN_SRC emacs-lisp
 (map! :leader :desc "Other cutom mappings" "h," nil)
 
@@ -292,7 +294,19 @@ List available fonts ~(print (font-family-list))~
 (map! :leader :desc "Togle selective display" "h,zc" #'toggle-selective-display)
 #+END_SRC
 
-** Search binding
+** File bindings
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Custom" "f," nil)
+(map! :leader :desc "Yank" "f,y" nil)
+(map! :leader :desc "copy projectile file path" "f,yY" #'w/projectile-copy-file-path)
+(map! :leader :desc "copy file path" "f,yy" #'s/show-buffer-file-path)
+(map! :leader :desc "copy file name" "f,yn" #'s/show-buffer-file-name)
+(map! :leader :desc "copy file name base" "f,yN" #'w/show-buffer-file-name-base)
+(map! :leader :desc "copy file path with line" "f,yl" #'w/show-buffer-file-path-with-line)
+(map! :leader :desc "copy projectile file path with line" "f,yL" #'w/projectile-copy-file-path-with-line)
+#+END_SRC
+
+** Search bindings
 #+BEGIN_SRC emacs-lisp
 (map! :leader :desc "szf" "szf" #'counsel-fzf)
 #+END_SRC
@@ -425,6 +439,68 @@ The compatibility of system clipboard
 #+END_SRC
 
 * My search config
+** Helm config
+   #+BEGIN_SRC emacs-lisp
+     (defun w/projectile-file-path ()
+       "Retrieve the file path relative to project root.
+
+     Returns:
+       - A string containing the file path in case of success.
+       - `nil' in case the current buffer does not visit a file."
+       (when-let (file-name (buffer-file-name))
+         (file-relative-name (file-truename file-name) (projectile-project-root))))
+
+     (defun w/projectile-copy-file-path ()
+       "Copy and show the file path relative to project root."
+       (interactive)
+       (if-let (file-path (w/projectile-file-path))
+           (progn
+             (message file-path)
+             (kill-new file-path))
+         (message "WARNING: Current buffer is not visiting a file!")))
+     (defun w/projectile-file-path-with-line ()
+       "Retrieve the file path relative to project root, including line number.
+
+     Returns:
+       - A string containing the file path in case of success.
+       - `nil' in case the current buffer does not visit a file."
+       (when-let (file-path (w/projectile-file-path))
+         (concat file-path ":" (number-to-string (line-number-at-pos)))))
+
+     (defun w/projectile-copy-file-path-with-line ()
+       "Copy and show the file path relative to project root."
+       (interactive)
+       (if-let (file-path (w/projectile-file-path-with-line))
+           (progn
+             (message file-path)
+             (kill-new file-path))
+         (message "WARNING: Current buffer is not visiting a file!")))
+
+
+     (defun w/projectile-find-file-path (input-file-name &optional input_dir_path non-recursive)
+       (let* ((project-root (projectile-ensure-project (projectile-project-root)))
+              (dir-path (if (and (not (null input_dir_path)) (string-prefix-p (projectile-ensure-project (projectile-project-root)) input_dir_path)) input_dir_path project-root))
+              )
+         (if (not non-recursive)
+             (let ((file (car (seq-filter (lambda (f)
+                                            (string= input-file-name (file-name-nondirectory f)))
+                                          (projectile-project-files dir-path)))))
+
+               (when file
+                 (expand-file-name file dir-path)
+                 )
+               )
+           (let* ((non-recursive-file-path (expand-file-name input-file-name dir-path))
+                  (file (car (seq-filter (lambda (f)
+                                           (string= non-recursive-file-path (expand-file-name f dir-path)))
+                                         (projectile-project-files dir-path)))))
+             (when file
+               (expand-file-name file dir-path)
+               )
+             )
+           )))
+   #+END_SRC
+
 ** Fzf search config
    run ~doom env~ to load fzf path
    #+BEGIN_SRC emacs-lisp
