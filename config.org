@@ -235,7 +235,11 @@ List available fonts ~(print (font-family-list))~
 #+END_SRC
 
 ** Clipboard config
+[[https://github.com/hlissner/doom-emacs/issues/1213#issuecomment-468970403][Doom emacs package load]]
 #+BEGIN_SRC emacs-lisp
+(setq osx-clipboard-path (format "%s/packages/osx-clipboard.el" w-dotfiles-folder-path))
+(load! osx-clipboard-path)
+
 (if (not(display-graphic-p))
     (progn
       (osx-clipboard-mode +1)
