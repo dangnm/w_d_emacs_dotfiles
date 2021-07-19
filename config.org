@@ -276,6 +276,20 @@ List available fonts ~(print (font-family-list))~
     (insert (shell-command-to-string "xsel -o -b"))
     )
   )
+; wsl-copy
+(defun w/wsl-copy (start end)
+  (interactive "r")
+  (shell-command-on-region start end "clip.exe")
+  (deactivate-mark))
+
+; wsl-paste
+(defun w/wsl-paste ()
+  (interactive)
+  (let ((clipboard
+     (shell-command-to-string "powershell.exe -command 'Get-Clipboard' 2> /dev/null")))
+    (setq clipboard (replace-regexp-in-string "\r" "" clipboard)) ; Remove Windows ^M characters
+    (setq clipboard (substring clipboard 0 -1)) ; Remove newline added by Powershell
+    (insert clipboard)))
 #+END_SRC
 ** Theme config
 #+BEGIN_SRC emacs-lisp
@@ -376,6 +390,12 @@ The compatibility of system clipboard
 (map! :leader
       :desc "paste-from-clipboard"
       "o p" #'w/paste-from-clipboard)
+(map! :leader
+      :desc "wsl-copy"
+      "o wy" #'w/wsl-copy)
+(map! :leader
+      :desc "wsl-paste"
+      "o wp" #'w/wsl-paste)
 #+END_SRC
 
 ** Dired secondary leader key
