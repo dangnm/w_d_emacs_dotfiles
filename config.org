@@ -14,6 +14,7 @@
 - [[#setup-editor-config][Setup editor config]]
   - [[#font-config][Font config]]
   - [[#clipboard-config][Clipboard config]]
+  - [[#theme-config][Theme config]]
 - [[#key-bindings][Key bindings]]
   - [[#commons-bindings][Commons bindings]]
   - [[#other-custom-bindings][Other custom bindings]]
@@ -274,6 +275,14 @@ List available fonts ~(print (font-family-list))~
         )
     (insert (shell-command-to-string "xsel -o -b"))
     )
+  )
+#+END_SRC
+** Theme config
+#+BEGIN_SRC emacs-lisp
+(if (not(display-graphic-p))
+    (progn
+      (setq doom-theme 'doom-gruvbox)
+      )
   )
 #+END_SRC
 * Key bindings
