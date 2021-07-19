@@ -195,7 +195,7 @@ List available fonts ~(print (font-family-list))~
 #+BEGIN_SRC emacs-lisp
 (defun w/font-exists-p (font)
   "check if font exists"
-  (let ((font-list (or (font-family-list) (fc-list))))
+  (let ((font-list (or (font-family-list) (and (fboundp 'fc-list) (fc-list)))))
     (if (member font font-list)
         t
       nil)))
