@@ -29,6 +29,7 @@
   - [[#clipboard-bindings][Clipboard bindings]]
   - [[#dired-secondary-leader-key][Dired secondary leader key]]
 - [[#my-search-config][My search config]]
+  - [[#ivy-config][Ivy config]]
   - [[#helm-config][Helm config]]
   - [[#fzf-search-config][Fzf search config]]
 - [[#my-git-tools-config][My git tools config]]
@@ -472,6 +473,12 @@ The compatibility of system clipboard
 #+END_SRC
 
 * My search config
+** Ivy config
+#+BEGIN_SRC emacs-lisp
+(map! (:after ivy :map ivy-minibuffer-map
+       "C-d" 'ivy-scroll-up-command
+       "C-u" 'ivy-scroll-down-command))
+#+END_SRC
 ** Helm config
    #+BEGIN_SRC emacs-lisp
      (defun w/projectile-file-path ()
