@@ -36,6 +36,7 @@
   - [[#magit-config][Magit config]]
 - [[#other-tools-configs][Other tools configs]]
   - [[#workspace-persp-mode-config][Workspace (PERSP MODE) config]]
+  - [[#shell-config][Shell config]]
 - [[#tips][Tips]]
   - [[#check-all-bindings][Check all bindings]]
   - [[#org-mode-basic-bindings][Org mode basic bindings]]
@@ -728,6 +729,77 @@ save/recover sessions
        ("q" nil "cancel" :color blue :column nil))
 
    #+END_SRC
+** Shell config
+#+BEGIN_SRC emacs-lisp
+(add-hook 'shell-mode-hook
+          (lambda ()
+            ;;Prevent backspace from deleting my shell prompt
+            (setq comint-prompt-read-only t)
+            ;;Go to the end of buffer to input when switching to insert mode
+            (add-hook 'evil-insert-state-entry-hook 'w/go-to-the-last-shell-prompt-maybe nil t)
+            (evil-define-key 'normal comint-mode-map (kbd "o") 'w/go-to-the-last-shell-prompt-maybe)
+            (evil-define-key 'normal comint-mode-map (kbd "p") 'w/shell-evil-paste-after)
+            ))
+(add-hook 'comint-mode-hook
+          (lambda ()
+            (toggle-truncate-lines -1) ;;Enable auto line wrapping
+            (define-key comint-mode-map (kbd "<up>") 'comint-previous-input)
+            (define-key comint-mode-map (kbd "<down>") 'comint-next-input)
+            (evil-define-key 'normal comint-mode-map (kbd "C-d") 'evil-scroll-down)
+            ))
+
+;; evil-paste-after for shell mode
+(defun w/shell-evil-paste-after ()
+  (interactive)
+  (w/go-to-the-last-shell-prompt-maybe)
+  (call-interactively 'evil-paste-after)
+)
+
+;;Go to the end of buffer to input when point is before the prompt.
+(defun w/go-to-the-last-shell-prompt-maybe ()
+  (interactive)
+  (let ((proc (get-buffer-process (current-buffer))))
+    (if (not(and proc (>= (point) (marker-position (process-mark proc)))))
+      (goto-char (point-max)))))
+
+;;Prevent RET sending input from anywhere
+(defun w/my-comint-send-input-maybe ()
+  "Only `comint-send-input' when point is after the latest prompt.
+Otherwise move to the end of the buffer."
+  (interactive)
+  (let ((proc (get-buffer-process (current-buffer))))
+    (if (and proc (>= (point) (marker-position (process-mark proc))))
+        (comint-send-input)
+      (goto-char (point-max)))))
+
+(with-eval-after-load "comint"
+  (define-key shell-mode-map [remap comint-send-input] 'w/my-comint-send-input-maybe))
+
+;;ansi-term for tmux server
+(eval-after-load "term"
+  '(progn
+     (general-define-key
+      :states '(insert)
+      :keymaps 'term-raw-map
+      "C-y c" '((lambda () (interactive) (term-send-raw-string "\C-yc")) :which-key "_")
+      "C-y d" '((lambda () (interactive) (term-send-raw-string "\C-yd")) :which-key "_")
+      "C-y x" '((lambda () (interactive) (term-send-raw-string "\C-yx")) :which-key "_")
+      "C-y s" '((lambda () (interactive) (term-send-raw-string "\C-ys")) :which-key "_")
+      "C-y $" '((lambda () (interactive) (term-send-raw-string "\C-y$")) :which-key "_")
+      "C-y n" '((lambda () (interactive) (term-send-raw-string "\C-yn")) :which-key "_")
+      "C-y p" '((lambda () (interactive) (term-send-raw-string "\C-yp")) :which-key "_")
+      "j" '((lambda () (interactive) (term-send-raw-string "j")) :which-key "_")
+      "k" '((lambda () (interactive) (term-send-raw-string "k")) :which-key "_")
+      "C-y 1" '((lambda () (interactive) (term-send-raw-string "\C-y1")) :which-key "_")
+      "C-y 2" '((lambda () (interactive) (term-send-raw-string "\C-y2")) :which-key "_")
+      "C-y 3" '((lambda () (interactive) (term-send-raw-string "\C-y3")) :which-key "_")
+      "C-y 4" '((lambda () (interactive) (term-send-raw-string "\C-y4")) :which-key "_")
+      "<backspace>" '((lambda () (interactive) (term-send-raw-string "\C-h")) :which-key "_")
+      "y" '((lambda () (interactive) (term-send-raw-string "y")) :which-key "_")
+      "n" '((lambda () (interactive) (term-send-raw-string "n")) :which-key "_")
+      )))
+
+#+END_SRC
 * Tips
 ** Check all bindings
 SPC h b b runs counsel-descbinds and will show all defined keys and their definitions.
