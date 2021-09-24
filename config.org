@@ -311,6 +311,8 @@ List available fonts ~(print (font-family-list))~
 
 (setq highlight-indentation-path (format "%s/packages/highlight-indentation.el" w-dotfiles-folder-path))
 (load! highlight-indentation-path)
+(set-face-background 'highlight-indentation-face "#e3e3d3")
+(set-face-background 'highlight-indentation-current-column-face "#c3b3b3")
 
 #+END_SRC
 * Key bindings
