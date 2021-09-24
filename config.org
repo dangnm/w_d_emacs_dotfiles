@@ -15,6 +15,7 @@
   - [[#font-config][Font config]]
   - [[#clipboard-config][Clipboard config]]
   - [[#theme-config][Theme config]]
+  - [[#indent-guide][Indent guide]]
 - [[#key-bindings][Key bindings]]
   - [[#commons-bindings][Commons bindings]]
   - [[#other-custom-bindings][Other custom bindings]]
@@ -301,6 +302,16 @@ List available fonts ~(print (font-family-list))~
       (setq doom-theme 'doom-gruvbox)
       )
   )
+#+END_SRC
+** Indent guide
+#+BEGIN_SRC emacs-lisp
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Indent guide
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(setq highlight-indentation-path (format "%s/packages/highlight-indentation.el" w-dotfiles-folder-path))
+(load! highlight-indentation-path)
+
 #+END_SRC
 * Key bindings
 ** Commons bindings
