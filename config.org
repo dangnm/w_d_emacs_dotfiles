@@ -298,6 +298,7 @@ List available fonts ~(print (font-family-list))~
 #+END_SRC
 
 ** Clipboard SSH config
+iTerm2 -> Preferences -> Selection -> [check] Applications in terminal may access clipboard.
 #+BEGIN_SRC emacs-lisp
 (setq clipetty-path (format "%s/packages/clipetty.el" w-dotfiles-folder-path))
 (load! clipetty-path)
