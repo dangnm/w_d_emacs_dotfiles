@@ -14,6 +14,7 @@
 - [[#setup-editor-config][Setup editor config]]
   - [[#font-config][Font config]]
   - [[#clipboard-config][Clipboard config]]
+  - [[#clipboard-ssh-config][Clipboard SSH config]]
   - [[#theme-config][Theme config]]
   - [[#indent-guide][Indent guide]]
 - [[#key-bindings][Key bindings]]
@@ -295,6 +296,15 @@ List available fonts ~(print (font-family-list))~
     (setq clipboard (substring clipboard 0 -1)) ; Remove newline added by Powershell
     (insert clipboard)))
 #+END_SRC
+
+** Clipboard SSH config
+#+BEGIN_SRC emacs-lisp
+(setq clipetty-path (format "%s/packages/clipetty.el" w-dotfiles-folder-path))
+(load! clipetty-path)
+(require 'clipetty)
+(global-clipetty-mode)
+#+END_SRC
+
 ** Theme config
 #+BEGIN_SRC emacs-lisp
 (if (not(display-graphic-p))
