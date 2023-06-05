@@ -1,0 +1,822 @@
+#+TITLE: Doom Emacs dotfiles
+* Table of contents                                               :TOC:QUOTE:
+#+BEGIN_QUOTE
+- [[#installation][Installation]]
+  - [[#install-doom-emacs][Install Doom Emacs]]
+  - [[#clone-this-repo-into-home-folder][Clone this repo into home folder]]
+  - [[#setup-emacs-dotfiles][Setup Emacs dotfiles]]
+  - [[#enable-org-file-config][Enable org file config]]
+  - [[#rebuild-config][Rebuild config]]
+- [[#helpers][Helpers]]
+  - [[#basic-helpers][Basic helpers]]
+  - [[#file-path-helpers][File path helpers]]
+  - [[#text-edit-helpers][Text edit helpers]]
+- [[#setup-editor-config][Setup editor config]]
+  - [[#font-config][Font config]]
+  - [[#clipboard-config][Clipboard config]]
+  - [[#clipboard-ssh-config][Clipboard SSH config]]
+  - [[#theme-config][Theme config]]
+  - [[#indent-guide][Indent guide]]
+- [[#key-bindings][Key bindings]]
+  - [[#commons-bindings][Commons bindings]]
+  - [[#other-custom-bindings][Other custom bindings]]
+  - [[#file-bindings][File bindings]]
+  - [[#windows-binding][Windows binding]]
+  - [[#jump-binding][Jump binding]]
+  - [[#register-binding][Register binding]]
+  - [[#git-binding][Git binding]]
+  - [[#layouts][Layouts]]
+  - [[#clipboard-bindings][Clipboard bindings]]
+  - [[#dired-secondary-leader-key][Dired secondary leader key]]
+- [[#my-search-config][My search config]]
+  - [[#ivy-config][Ivy config]]
+  - [[#helm-config][Helm config]]
+  - [[#fzf-search-config][Fzf search config]]
+- [[#my-git-tools-config][My git tools config]]
+  - [[#magit-config][Magit config]]
+- [[#other-tools-configs][Other tools configs]]
+  - [[#workspace-persp-mode-config][Workspace (PERSP MODE) config]]
+  - [[#shell-config][Shell config]]
+- [[#tips][Tips]]
+  - [[#check-all-bindings][Check all bindings]]
+  - [[#org-mode-basic-bindings][Org mode basic bindings]]
+#+END_QUOTE
+
+* Installation
+** Install Doom Emacs
+mkdir ~/.doom.d
+Click [[https://github.com/hlissner/doom-emacs#install][here]] to install Doom Emacs if it's not ready in the target environment
+** Clone this repo into home folder
+Run ~git clone git@github.com:dangnm/w_d_emacs_dotfiles.git ~/w_d_emacs_dotfiles~
+** Setup Emacs dotfiles
+ln -sf ~/w_d_emacs_dotfiles/doom_3_0_0_pre_config.org ~/.doom.d/config.org
+** Enable org file config
+- Go to ~/.doom.d/init.el
+- Uncomment ~literate~ in init.el
+** Rebuild config
+- Run ~SPC h r r~ OR ~M-x doom/reload~ to re-apply configurations from config.org
+- Run ~doom env~ to re-apply env vars for Doom Emacs
+* Helpers
+** Basic helpers
+   #+BEGIN_SRC emacs-lisp
+     (defun create-shell ()
+       "creates a shell with a given name"
+       (interactive);; "Prompt\n shell name:")
+       (let ((shell-name (read-string "shell name: " nil)))
+         (shell (concat "*" shell-name "*"))))
+
+     (defun create-shell-with-name (name)
+       (shell (concat "*" name "*")))
+                                             ; Folding
+     (defun toggle-selective-display (column)
+       (interactive "P")
+       (set-selective-display
+        (or column
+            (unless selective-display
+              (1+ (current-column))))))
+     ;; from https://gist.github.com/3402786
+     (defun w/toggle-maximize-buffer ()
+       "Maximize buffer"
+       (interactive)
+       (if (and (= 1 (length (window-list)))
+                (assoc ?_ register-alist))
+           (jump-to-register ?_)
+         (progn
+           (window-configuration-to-register ?_)
+           (delete-other-windows))))
+
+   #+END_SRC
+** File path helpers
+   #+BEGIN_SRC emacs-lisp
+     ;Init file paths
+     (defun w/dotfiles-folder-path ()
+       (let ((path1 (replace-regexp-in-string  "\n\+$" "" (shell-command-to-string "dirname $(readlink ~/.doom.d/config.org) 2>/dev/null"))))
+         (if (not(string= "" path1))
+           path1
+           (replace-regexp-in-string  "\n\+$" "" (shell-command-to-string "readlink ~/.doom.d 2>/dev/null"))
+           )
+         )
+       )
+     (setq w-dotfiles-folder-path (w/dotfiles-folder-path))
+     (setq w-dotfiles-pakages-folder-path (format "%s/packages" w-dotfiles-folder-path))
+     (defun s/show-buffer-file-path ()
+       "Show the full path to the current file in the minibuffer."
+       (interactive)
+       (let ((file-name (buffer-file-name)))
+         (if file-name
+             (progn
+               (message file-name)
+               (kill-new file-name))
+           (error "Buffer not visiting a file"))))
+
+     (defun w/show-buffer-project-path ()
+       "Show the full path to the current project in the minibuffer."
+       (interactive)
+       (let ((project-path (projectile-project-root)))
+         (if project-path
+             (progn
+               (message project-path)
+               (kill-new project-path))
+           (error "Buffer not visiting a project"))))
+
+     (defun s/show-buffer-file-name ()
+       "Show the full path to the current file in the minibuffer."
+       (interactive)
+       (let ((file-name (file-name-nondirectory(buffer-file-name))))
+         (if file-name
+             (progn
+               (message file-name)
+               (kill-new file-name))
+           (error "Buffer not visiting a file"))))
+
+     (defun w/show-buffer-file-name-base ()
+       "Show current file name base in the minibuffer."
+       (interactive)
+       (let ((file-name (file-name-base(buffer-file-name))))
+         (if file-name
+             (progn
+               (message file-name)
+               (kill-new file-name))
+           (error "Buffer not visiting a file"))))
+
+     (defun w/file-path-with-line ()
+       "Retrieve the file path of the current buffer, including line number.
+
+     Returns:
+       - A string containing the file path in case of success.
+       - `nil' in case the current buffer does not have a directory."
+       (when-let (file-path (buffer-file-name))
+         (concat file-path ":" (number-to-string (line-number-at-pos)))))
+
+     (defun w/show-buffer-file-path-with-line ()
+       "Show current file name base in the minibuffer."
+       (interactive)
+       (let ((file-name (w/file-path-with-line)))
+         (if file-name
+             (progn
+               (message file-name)
+               (kill-new file-name))
+           (error "Buffer not visiting a file"))))
+   #+END_SRC
+
+** Text edit helpers
+   #+BEGIN_SRC emacs-lisp
+     (defun toggle-camelcase-underscores ()
+       "Toggle between camelcase and underscore notation for the symbol at point."
+       (interactive)
+       (save-excursion
+         (let* ((bounds (bounds-of-thing-at-point 'symbol))
+                (start (car bounds))
+                (end (cdr bounds))
+                (currently-using-underscores-p (progn (goto-char start)
+                                                      (re-search-forward "_" end t))))
+           (if currently-using-underscores-p
+               (progn
+                 (upcase-initials-region start end)
+                 (replace-string "_" "" nil start end)
+                 (downcase-region start (1+ start)))
+             (replace-regexp "\\([A-Z]\\)" "_\\1" nil (1+ start) end)
+             (downcase-region start (cdr (bounds-of-thing-at-point 'symbol)))))))
+
+     (defun toggle-camelcase-motion ()
+       (interactive)
+       (if (get 'camelcase-motion-toggle-flag 'state)
+           (progn
+             (message "Disabled camelcase motion")
+             (subword-mode'-1)
+             (put 'camelcase-motion-toggle-flag'state nil))
+         (progn
+           (message "Enabled camelcase motion")
+           (subword-mode)
+           (put 'camelcase-motion-toggle-flag 'state t))
+         )
+       )
+   #+END_SRC
+
+* Setup editor config
+** Font config
+List available fonts ~(print (font-family-list))~
+
+#+BEGIN_SRC emacs-lisp
+(defun w/font-exists-p (font)
+  "check if font exists"
+  (let ((font-list (or (font-family-list) (and (fboundp 'fc-list) (fc-list)))))
+    (if (member font font-list)
+        t
+      nil)))
+(cond
+ ((string-equal system-type "windows-nt")
+  (progn
+    (message "Microsoft Windows")
+    (setq doom-font (font-spec :family "monospace" :size 16)
+          doom-big-font (font-spec :family "monospace" :size 36)
+          doom-variable-pitch-font (font-spec :family "sans" :size 24)
+          doom-unicode-font (font-spec :family "monospace")
+          doom-serif-font (font-spec :family "monospace" :weight 'light))
+    ))
+ ((string-equal system-type "darwin") ;  macOS
+  (progn
+    (message "Mac OS X")
+    (if (w/font-exists-p "Menlo")
+        (setq doom-font (font-spec :family "Menlo" :size 16)
+              doom-big-font (font-spec :family "Menlo" :size 36)
+              doom-variable-pitch-font (font-spec :family "Menlo" :size 24)
+              doom-unicode-font (font-spec :family "Menlo")
+              doom-serif-font (font-spec :family "Menlo" :weight 'light))
+      )
+    ))
+ ((string-equal system-type "gnu/linux")
+  (progn
+    (message "Linux")
+    (if (w/font-exists-p "DejaVu Sans Mono")
+        (setq doom-font (font-spec :family "DejaVu Sans Mono" :size 18)
+              doom-big-font (font-spec :family "DejaVu Sans Mono" :size 36)
+              doom-variable-pitch-font (font-spec :family "DejaVu Sans Mono" :size 24)
+              doom-unicode-font (font-spec :family "DejaVu Sans Mono")
+              doom-serif-font (font-spec :family "DejaVu Sans Mono" :weight 'light))
+      )
+    ))
+ )
+#+END_SRC
+
+** Clipboard config
+[[https://github.com/hlissner/doom-emacs/issues/1213#issuecomment-468970403][Doom emacs package load]]
+#+BEGIN_SRC emacs-lisp
+(setq osx-clipboard-path (format "%s/packages/osx-clipboard.el" w-dotfiles-folder-path))
+(load! osx-clipboard-path)
+
+(if (not(display-graphic-p))
+    (progn
+      (osx-clipboard-mode +1)
+      (setq x-select-enable-clipboard t)
+      (setq x-select-enable-primary t)
+      )
+  )
+;; Copy/past to system clipboard
+(defun w/copy-to-clipboard ()
+  "Copies selection to x-clipboard."
+  (interactive)
+  (if (display-graphic-p)
+      (progn
+        (message "Yanked region to x-clipboard.")
+        (call-interactively 'clipboard-kill-ring-save)
+        )
+    (if (region-active-p)
+        (progn
+          (shell-command-on-region (region-beginning) (region-end) "xsel -i -b")
+          (message "Yanked region to clipboard.")
+          (deactivate-mark))
+      (message "No region active; can't yank to clipboard!")))
+  )
+
+(defun w/paste-from-clipboard ()
+  "Pastes from x-clipboard."
+  (interactive)
+  (if (display-graphic-p)
+      (progn
+        (clipboard-yank)
+        (message "graphics active")
+        )
+    (insert (shell-command-to-string "xsel -o -b"))
+    )
+  )
+; wsl-copy
+(defun w/wsl-copy (start end)
+  (interactive "r")
+  (shell-command-on-region start end "clip.exe")
+  (deactivate-mark))
+
+; wsl-paste
+(defun w/wsl-paste ()
+  (interactive)
+  (let ((clipboard
+     (shell-command-to-string "powershell.exe -command 'Get-Clipboard' 2> /dev/null")))
+    (setq clipboard (replace-regexp-in-string "\r" "" clipboard)) ; Remove Windows ^M characters
+    (setq clipboard (substring clipboard 0 -1)) ; Remove newline added by Powershell
+    (insert clipboard)))
+#+END_SRC
+
+** Clipboard SSH config
+iTerm2 -> Preferences -> Selection -> [check] Applications in terminal may access clipboard.
+#+BEGIN_SRC emacs-lisp
+(setq clipetty-path (format "%s/packages/clipetty.el" w-dotfiles-folder-path))
+(load! clipetty-path)
+(require 'clipetty)
+(global-clipetty-mode)
+#+END_SRC
+
+** Theme config
+#+BEGIN_SRC emacs-lisp
+(if (not(display-graphic-p))
+    (progn
+      (setq doom-theme 'doom-gruvbox)
+      )
+  )
+#+END_SRC
+** Indent guide
+#+BEGIN_SRC emacs-lisp
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Indent guide
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(setq highlight-indentation-path (format "%s/packages/highlight-indentation.el" w-dotfiles-folder-path))
+(load! highlight-indentation-path)
+(set-face-background 'highlight-indentation-face "#e3e3d3")
+(set-face-background 'highlight-indentation-current-column-face "#c3b3b3")
+
+#+END_SRC
+* Key bindings
+** Commons bindings
+#+BEGIN_SRC emacs-lisp
+(setq w/main-leader-key "SPC")
+(setq w/secondary-leader-key ",")
+#+END_SRC
+** Other custom bindings
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Other cutom mappings" "h," nil)
+
+(map! :leader :desc "Text" "h,x" nil)
+(map! :leader :desc "Upcase region" "h,xU" #'upcase-region)
+(map! :leader :desc "Downcase region" "h,xu" #'downcase-region)
+(map! :leader :desc "Toggle camelcase undersores" "h,xs" #'toggle-camelcase-underscores)
+(map! :leader :desc "Delete" "h,xd" nil)
+(map! :leader :desc "delete trailing whitespace" "h,xdw" #'delete-trailing-whitespace)
+
+
+(map! :leader :desc "Zoom" "h,z" nil)
+(map! :leader :desc "Togle selective display" "h,zc" #'toggle-selective-display)
+#+END_SRC
+
+** File bindings
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Custom" "f," nil)
+(map! :leader :desc "Yank" "f,y" nil)
+(map! :leader :desc "copy projectile file path" "f,yY" #'w/projectile-copy-file-path)
+(map! :leader :desc "copy file path" "f,yy" #'s/show-buffer-file-path)
+(map! :leader :desc "copy file name" "f,yn" #'s/show-buffer-file-name)
+(map! :leader :desc "copy file name base" "f,yN" #'w/show-buffer-file-name-base)
+(map! :leader :desc "copy file path with line" "f,yl" #'w/show-buffer-file-path-with-line)
+(map! :leader :desc "copy projectile file path with line" "f,yL" #'w/projectile-copy-file-path-with-line)
+#+END_SRC
+
+** Windows binding
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Split window right" "w/" (lambda () (interactive) (split-window-right) (other-window 1)))
+(map! :leader :desc "Toggle frame maximized" "w C-m" #'toggle-frame-maximized)
+(map! :leader :desc "Toggle maximized buffer" "w,m" #'w/toggle-maximize-buffer)
+#+END_SRC
+
+** Jump binding
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "jump" "j" nil)
+(map! :leader :desc "dired jump" "jd" #'magit-dired-jump)
+(map! :leader :desc "goto char" "jj" #'evil-avy-goto-char)
+(map! :leader :desc "go to char 2" "jJ" #'evil-avy-goto-char-2)
+(map! :leader :desc "goto line" "jl" #'evil-avy-goto-line)
+(map! :leader :desc "go to word" "jw" #'evil-avy-goto-word-or-subword-1)
+#+END_SRC
+
+** Register binding
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Registers" "r" nil)
+(map! :leader :desc "Jump to register" "rj" #'jump-to-register)
+(map! :leader :desc "Write to register" "rw" #'window-configuration-to-register)
+(map! :leader :desc "helm resume" "rl" #'helm-resume)
+#+END_SRC
+
+** Git binding
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Custom mapping" "g," nil)
+(map! :leader :desc "Git link" "g,l" #'+vc/browse-at-remote-kill)
+(map! :leader :desc "Last commit message" "g,y" #'w/git-last-commit-message)
+(map! :leader :desc "Time machine" "gt" #'w/git-timemachine-on)
+#+END_SRC
+
+** Layouts
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Persp select" "l" #'w/persp-hydra/body)
+#+END_SRC
+
+** Clipboard bindings
+The compatibility of system clipboard
+#+BEGIN_SRC emacs-lisp
+(map! :leader
+      :desc "copy-to-clipboard"
+      "o y" #'w/copy-to-clipboard)
+(map! :leader
+      :desc "paste-from-clipboard"
+      "o p" #'w/paste-from-clipboard)
+(map! :leader
+      :desc "wsl-copy"
+      "o wy" #'w/wsl-copy)
+(map! :leader
+      :desc "wsl-paste"
+      "o wp" #'w/wsl-paste)
+#+END_SRC
+
+** Dired secondary leader key
+#+BEGIN_SRC emacs-lisp
+       (require 'shell)
+       (general-define-key
+        :states '(normal visual insert emacs)
+        :prefix w/secondary-leader-key
+        :non-normal-prefix "M-n"
+        :keymaps 'dired-mode-map
+        "," 'dired-up-directory
+        "u" '(dired-unmark :which-key "unmark(u)")
+        "m" '(dired-mark :which-key "mark(m)")
+        "r" '(revert-buffer-no-confirm :which-key "refresh(r)")
+        "j" 'dired-next-subdir
+        "k" 'dired-prev-subdir
+        "h" 'w/dired-go-to-home-folder
+        "F" 'find-name-dired
+                                             ;Actions
+        "a" '(:ignore t :which-key "Actions")
+        "af" '(:ignore t :which-key "Files")
+        "afn" '(find-file :which-key "Create file")
+        "afN" 'dired-create-directory
+        "afr" '(dired-do-rename :which-key "Rename(Shift + r)")
+        "afd" '(dired-do-delete :which-key "Delete(Shift + d)")
+        "ae" '(:ignore t :which-key "Edit")
+        "aex" '(dired-copy-paste-do-cut :which-key "Cut")
+        "aec" '(dired-copy-paste-do-copy :which-key "Copy")
+        "aep" '(dired-copy-paste-do-paste :which-key "Paste")
+                                             ;Toggle
+        "T" '(:ignore t :which-key "toggles")
+        "Td" 'dired-hide-details-mode
+        )
+     (defun w/dired-go-to-home-folder ()
+       (interactive)
+       (if (not(string= "~/" default-directory))
+           (find-alternate-file "~/")
+         )
+       )
+
+     (defun dired-copy-paste-do-cut ()
+       "In dired-mode, cut a file/dir on current line or all marked file/dir(s)."
+       (interactive)
+       (setq dired-copy-paste-stored-file-list (dired-get-marked-files)
+             dired-copy-paste-func 'rename-file)
+       (message
+        (format "%S is/are cut."dired-copy-paste-stored-file-list)))
+
+
+     (defun dired-copy-paste-do-copy ()
+       "In dired-mode, copy a file/dir on current line or all marked file/dir(s)."
+       (interactive)
+       (setq dired-copy-paste-stored-file-list (dired-get-marked-files)
+             dired-copy-paste-func 'copy-file)
+       (message
+        (format "%S is/are copied."dired-copy-paste-stored-file-list)))
+
+
+     (defun dired-copy-paste-do-paste ()
+       "In dired-mode, paste cut/copied file/dir(s) into current directory."
+       (interactive)
+       (let ((stored-file-list nil))
+         (dolist (stored-file dired-copy-paste-stored-file-list)
+           (condition-case nil
+               (progn
+                 (funcall dired-copy-paste-func stored-file (dired-current-directory) 1)
+                 (push stored-file stored-file-list))
+             (error nil)))
+         (if (eq dired-copy-paste-func 'rename-file)
+             (setq dired-copy-paste-stored-file-list nil
+                   dired-copy-paste-func nil))
+         (revert-buffer)
+         (message
+          (format "%d file/dir(s) pasted into current directory." (length stored-file-list)))))
+#+END_SRC
+
+* My search config
+** Ivy config
+#+BEGIN_SRC emacs-lisp
+(map! (:after ivy :map ivy-minibuffer-map
+       "C-d" 'ivy-scroll-up-command
+       "C-u" 'ivy-scroll-down-command))
+#+END_SRC
+** Helm config
+   #+BEGIN_SRC emacs-lisp
+     (defun w/projectile-file-path ()
+       "Retrieve the file path relative to project root.
+
+     Returns:
+       - A string containing the file path in case of success.
+       - `nil' in case the current buffer does not visit a file."
+       (when-let (file-name (buffer-file-name))
+         (file-relative-name (file-truename file-name) (projectile-project-root))))
+
+     (defun w/projectile-copy-file-path ()
+       "Copy and show the file path relative to project root."
+       (interactive)
+       (if-let (file-path (w/projectile-file-path))
+           (progn
+             (message file-path)
+             (kill-new file-path))
+         (message "WARNING: Current buffer is not visiting a file!")))
+     (defun w/projectile-file-path-with-line ()
+       "Retrieve the file path relative to project root, including line number.
+
+     Returns:
+       - A string containing the file path in case of success.
+       - `nil' in case the current buffer does not visit a file."
+       (when-let (file-path (w/projectile-file-path))
+         (concat file-path ":" (number-to-string (line-number-at-pos)))))
+
+     (defun w/projectile-copy-file-path-with-line ()
+       "Copy and show the file path relative to project root."
+       (interactive)
+       (if-let (file-path (w/projectile-file-path-with-line))
+           (progn
+             (message file-path)
+             (kill-new file-path))
+         (message "WARNING: Current buffer is not visiting a file!")))
+
+
+     (defun w/projectile-find-file-path (input-file-name &optional input_dir_path non-recursive)
+       (let* ((project-root (projectile-ensure-project (projectile-project-root)))
+              (dir-path (if (and (not (null input_dir_path)) (string-prefix-p (projectile-ensure-project (projectile-project-root)) input_dir_path)) input_dir_path project-root))
+              )
+         (if (not non-recursive)
+             (let ((file (car (seq-filter (lambda (f)
+                                            (string= input-file-name (file-name-nondirectory f)))
+                                          (projectile-project-files dir-path)))))
+
+               (when file
+                 (expand-file-name file dir-path)
+                 )
+               )
+           (let* ((non-recursive-file-path (expand-file-name input-file-name dir-path))
+                  (file (car (seq-filter (lambda (f)
+                                           (string= non-recursive-file-path (expand-file-name f dir-path)))
+                                         (projectile-project-files dir-path)))))
+             (when file
+               (expand-file-name file dir-path)
+               )
+             )
+           )))
+   #+END_SRC
+
+** Fzf search config
+   run ~doom env~ to load fzf path
+   #+BEGIN_SRC emacs-lisp
+     (when (memq window-system '(mac ns))
+       (setenv "PATH" (concat (getenv "PATH") ":~/.fzf/bin"))
+       (setq exec-path (append exec-path '(":~/.fzf/bin"))))
+     (setq fzf-path (format "%s/packages/fzf.el" w-dotfiles-folder-path))
+     (use-package fzf
+       :commands fzf
+       :load-path fzf-path)
+   #+END_SRC
+
+* My git tools config
+** Magit config :QUOTE:
+#+BEGIN_SRC emacs-lisp
+     ;; (setq hydra-path (format "%s/packages/hydra.el" w-dotfiles-folder-path))
+     ;; (use-package hydra :commands fzf :load-path hydra-path :init :ensure t)
+
+     ;; (use-package git-timemachine
+     ;;   :commands (git-timemachine)
+     ;;   :config
+
+     ;;   (defun git-timemachine-blame ()
+     ;;     "Call magit-blame on current revision."
+     ;;     (interactive)
+     ;;     (if (fboundp 'magit-blame)
+     ;;         (let ((magit-buffer-revision (car git-timemachine-revision)))
+     ;;           (magit-blame))
+     ;;       (message "You need to install magit for blame capabilities")))
+
+     ;;   (defun git-timemachine-find-revision-by-id (revision-id)
+     ;;     (require 'cl)
+     ;;     (message revision-id)
+     ;;     (cl-loop for v in (git-timemachine--revisions)
+     ;;              until (cl-search revision-id (nth 0 v))
+     ;;              finally return v
+     ;;              )
+     ;;     )
+     ;;   (defun git-timemachine-go-to-revision-id (revision-id)
+     ;;     (interactive "sEnter revision id: ")
+     ;;     (git-timemachine-show-revision (git-timemachine-find-revision-by-id revision-id))
+     ;;     )
+     ;;   (evil-define-key 'normal git-timemachine-mode-map (kbd "G") 'git-timemachine-go-to-revision-id)
+     ;;   )
+
+     ;; (defun w/git-timemachine-on ()
+     ;;   (interactive)
+     ;;   (git-timemachine)
+     ;;   (w/git-timemachine-hydra/body))
+
+
+     ;; (defhydra w/git-timemachine-hydra
+     ;;   (:color pink :hint nil :exit t)
+     ;;   ("n" git-timemachine-show-next-revision "Next Revision" :column "Go to")
+     ;;   ("p" git-timemachine-show-previous-revision "Next Revision")
+     ;;   ("c" git-timemachine-show-current-revision "Current Revision")
+     ;;   ("g" git-timemachine-show-nth-revision "Nth Revision")
+     ;;   ("t" git-timemachine-show-revision-fuzzy "Search")
+     ;;   ("W" git-timemachine-kill-revision "Copy full revision" :column "Actions")
+     ;;   ("w" git-timemachine-kill-abbreviated-revision "Copy abbreviated revision" :column "Actions")
+     ;;   ("C" git-timemachine-show-commit "Show commit")
+     ;;   ("b" git-timemachine-blame "Blame")
+     ;;   ("G" git-timemachine-go-to-revision-id "Revision Id")
+     ;;   ("q" nil "cancel" :color blue :column nil))
+     ;;                                         ;indicating inserted, modified or deleted lines
+     ;; (use-package diff-hl
+     ;;   :ensure t
+     ;;   :commands (diff-hl-mode)
+     ;;   :config
+     ;;   (diff-hl-margin-mode)
+     ;;   (setq diff-hl-margin-side 'right)
+     ;;   )
+     ;;                                         ;Init git modified highlighting at programming mode
+     ;; (add-hook 'prog-mode-hook
+     ;;           (lambda()
+     ;;             (diff-hl-mode t)
+     ;;             )
+     ;;           )
+
+     ;; (eval-after-load 'git-timemachine
+     ;;   '(progn
+     ;;      (evil-make-overriding-map git-timemachine-mode-map 'normal)
+     ;;      ;; force update evil keymaps after git-timemachine-mode loaded
+     ;;      (add-hook 'git-timemachine-mode-hook #'evil-normalize-keymaps)))
+
+     (defun w/git-last-commit-message ()
+       (interactive)
+       (let ((git-message (shell-command-to-string "git log -1 --pretty=%B 2>/dev/null")))
+         (kill-new git-message)
+         )
+       )
+#+END_SRC
+
+* Other tools configs
+** Workspace (PERSP MODE) config
+save/recover sessions
+#+BEGIN_SRC emacs-lisp
+     (defun w/ivy-persp-switch-project (arg)
+       (interactive "P")
+       (persp-mode)
+       (helm-projectile-configs-load)
+       (ivy-mode)
+       (define-key ivy-minibuffer-map (kbd "C-j") 'ivy-next-line)
+       (define-key ivy-minibuffer-map (kbd "C-k") 'ivy-previous-line)
+       (ivy-read "Switch to Project Perspective: "
+                 (if (projectile-project-p)
+                     (cons (abbreviate-file-name (projectile-project-root))
+                           (projectile-relevant-known-projects))
+                   projectile-known-projects)
+                 :action (lambda (project)
+                           (let* ((persp-reset-windows-on-nil-window-conf t)
+                                  (exists (persp-with-name-exists-p project)))
+                             (persp-switch project)
+                             (unless exists
+                               (progn
+                                 (let ((projectile-completion-system 'ivy))
+                                   (projectile-switch-project-by-name project))))))))
+
+     ;; perspectives for emacs
+     (defun w/persp-load-state-from-file ()
+       (interactive)
+       (persp-mode 1)
+       (call-interactively 'persp-load-state-from-file)
+       )
+
+     (defun w/persp-save-state-to-file ()
+       (interactive)
+       (persp-mode 1)
+       (call-interactively 'persp-save-state-to-file)
+       )
+
+     (use-package persp-mode
+       :commands (persp-mode)
+       :init
+       (setq wg-morph-on nil ;; switch off animation
+             persp-add-buffer-on-after-change-major-mode t
+             persp-auto-resume-time -1
+             persp-autokill-buffer-on-remove 'kill-weak
+             persp-save-dir (expand-file-name "~/.emacs.d/.cache/layouts/"))
+       )
+
+     (defun w/persp-layout ()
+       "Switch to perspective of position POS."
+       (interactive)
+       (let* ((persp-current-name (safe-persp-name (get-current-persp)))
+              (highlight-persps (lambda (elt idx)
+                                  (format (if (string= elt persp-current-name) "%d *%s*" "%d %s")
+                                          (+ idx 1)
+                                          (if (string= elt "none") elt (f-base elt))))))
+         (string-join (seq-map-indexed highlight-persps (persp-names-current-frame-fast-ordered)) " | ")))
+
+
+     (defun w/persp-switch-to-number(number)
+       (persp-switch (nth (1+ (- number 2)) (persp-names-current-frame-fast-ordered)))
+       )
+
+     (use-package hydra
+       :ensure t
+       :defer t
+       )
+
+     ;; (defhydra w/persp-hydra
+     ;;   (:color pink :hint nil :exit t)
+     ;;   "Layout: %s(w/persp-layout)"
+     ;;   ("n" persp-next "Next Layout" :column "Go to")
+     ;;   ("p" persp-prev "Prev Layout")
+     ;;   ("l" persp-switch "Switch Layout")
+     ;;   ("1" (w/persp-switch-to-number 1))
+     ;;   ("2" (w/persp-switch-to-number 2))
+     ;;   ("3" (w/persp-switch-to-number 3))
+     ;;   ("4" (w/persp-switch-to-number 4))
+     ;;   ("5" (w/persp-switch-to-number 5))
+     ;;   ("6" (w/persp-switch-to-number 6))
+     ;;   ("7" (w/persp-switch-to-number 7))
+     ;;   ("8" (w/persp-switch-to-number 8))
+     ;;   ("9" (w/persp-switch-to-number 9))
+
+     ;;   ("d" persp-kill :column "Actions")
+     ;;   ("r" persp-rename)
+     ;;   ("s" w/persp-save-state-to-file "Save Layout")
+     ;;   ("L" w/persp-load-state-from-file "Load Layout")
+     ;;   ("q" nil "cancel" :color blue :column nil))
+
+   #+END_SRC
+** Shell config
+#+BEGIN_SRC emacs-lisp
+(add-hook 'shell-mode-hook
+          (lambda ()
+            ;;Prevent backspace from deleting my shell prompt
+            (setq comint-prompt-read-only t)
+            ;;Go to the end of buffer to input when switching to insert mode
+            (add-hook 'evil-insert-state-entry-hook 'w/go-to-the-last-shell-prompt-maybe nil t)
+            (evil-define-key 'normal comint-mode-map (kbd "o") 'w/go-to-the-last-shell-prompt-maybe)
+            (evil-define-key 'normal comint-mode-map (kbd "p") 'w/shell-evil-paste-after)
+            ))
+(add-hook 'comint-mode-hook
+          (lambda ()
+            (toggle-truncate-lines -1) ;;Enable auto line wrapping
+            (define-key comint-mode-map (kbd "<up>") 'comint-previous-input)
+            (define-key comint-mode-map (kbd "<down>") 'comint-next-input)
+            (evil-define-key 'normal comint-mode-map (kbd "C-d") 'evil-scroll-down)
+            ))
+
+;; evil-paste-after for shell mode
+(defun w/shell-evil-paste-after ()
+  (interactive)
+  (w/go-to-the-last-shell-prompt-maybe)
+  (call-interactively 'evil-paste-after)
+)
+
+;;Go to the end of buffer to input when point is before the prompt.
+(defun w/go-to-the-last-shell-prompt-maybe ()
+  (interactive)
+  (let ((proc (get-buffer-process (current-buffer))))
+    (if (not(and proc (>= (point) (marker-position (process-mark proc)))))
+      (goto-char (point-max)))))
+
+;;Prevent RET sending input from anywhere
+(defun w/my-comint-send-input-maybe ()
+  "Only `comint-send-input' when point is after the latest prompt.
+Otherwise move to the end of the buffer."
+  (interactive)
+  (let ((proc (get-buffer-process (current-buffer))))
+    (if (and proc (>= (point) (marker-position (process-mark proc))))
+        (comint-send-input)
+      (goto-char (point-max)))))
+
+(with-eval-after-load "comint"
+  (define-key shell-mode-map [remap comint-send-input] 'w/my-comint-send-input-maybe))
+
+;;ansi-term for tmux server
+(eval-after-load "term"
+  '(progn
+     (general-define-key
+      :states '(insert)
+      :keymaps 'term-raw-map
+      "C-y c" '((lambda () (interactive) (term-send-raw-string "\C-yc")) :which-key "_")
+      "C-y d" '((lambda () (interactive) (term-send-raw-string "\C-yd")) :which-key "_")
+      "C-y x" '((lambda () (interactive) (term-send-raw-string "\C-yx")) :which-key "_")
+      "C-y s" '((lambda () (interactive) (term-send-raw-string "\C-ys")) :which-key "_")
+      "C-y $" '((lambda () (interactive) (term-send-raw-string "\C-y$")) :which-key "_")
+      "C-y n" '((lambda () (interactive) (term-send-raw-string "\C-yn")) :which-key "_")
+      "C-y p" '((lambda () (interactive) (term-send-raw-string "\C-yp")) :which-key "_")
+      "j" '((lambda () (interactive) (term-send-raw-string "j")) :which-key "_")
+      "k" '((lambda () (interactive) (term-send-raw-string "k")) :which-key "_")
+      "C-y 1" '((lambda () (interactive) (term-send-raw-string "\C-y1")) :which-key "_")
+      "C-y 2" '((lambda () (interactive) (term-send-raw-string "\C-y2")) :which-key "_")
+      "C-y 3" '((lambda () (interactive) (term-send-raw-string "\C-y3")) :which-key "_")
+      "C-y 4" '((lambda () (interactive) (term-send-raw-string "\C-y4")) :which-key "_")
+      "<backspace>" '((lambda () (interactive) (term-send-raw-string "\C-h")) :which-key "_")
+      "y" '((lambda () (interactive) (term-send-raw-string "y")) :which-key "_")
+      "n" '((lambda () (interactive) (term-send-raw-string "n")) :which-key "_")
+      )))
+
+#+END_SRC
+* Tips
+** Check all bindings
+SPC h b b  will show all defined keys and their definitions.
+** Org mode basic bindings
+- Use ~Shift Tab~ to fold or unfold all headlines
+- Use ~zc~ or ~zo~ on headlines to fold or unfold headlines
+- Use ~Ctrl C Ctrl C~ to execute code
+- Use ~Ctrl C '~ to toggle code's edit mode
