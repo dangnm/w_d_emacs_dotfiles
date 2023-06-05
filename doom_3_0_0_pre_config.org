@@ -572,75 +572,78 @@ The compatibility of system clipboard
 * My git tools config
 ** Magit config :QUOTE:
 #+BEGIN_SRC emacs-lisp
-     ;; (setq hydra-path (format "%s/packages/hydra.el" w-dotfiles-folder-path))
-     ;; (use-package hydra :commands fzf :load-path hydra-path :init :ensure t)
-
-     ;; (use-package git-timemachine
-     ;;   :commands (git-timemachine)
-     ;;   :config
-
-     ;;   (defun git-timemachine-blame ()
-     ;;     "Call magit-blame on current revision."
-     ;;     (interactive)
-     ;;     (if (fboundp 'magit-blame)
-     ;;         (let ((magit-buffer-revision (car git-timemachine-revision)))
-     ;;           (magit-blame))
-     ;;       (message "You need to install magit for blame capabilities")))
-
-     ;;   (defun git-timemachine-find-revision-by-id (revision-id)
-     ;;     (require 'cl)
-     ;;     (message revision-id)
-     ;;     (cl-loop for v in (git-timemachine--revisions)
-     ;;              until (cl-search revision-id (nth 0 v))
-     ;;              finally return v
-     ;;              )
-     ;;     )
-     ;;   (defun git-timemachine-go-to-revision-id (revision-id)
-     ;;     (interactive "sEnter revision id: ")
-     ;;     (git-timemachine-show-revision (git-timemachine-find-revision-by-id revision-id))
-     ;;     )
-     ;;   (evil-define-key 'normal git-timemachine-mode-map (kbd "G") 'git-timemachine-go-to-revision-id)
-     ;;   )
-
-     ;; (defun w/git-timemachine-on ()
-     ;;   (interactive)
-     ;;   (git-timemachine)
-     ;;   (w/git-timemachine-hydra/body))
+     (setq lv-hydra-path (format "%s/packages/hydra/lv.el" w-dotfiles-folder-path))
+     (setq hydra-path (format "%s/packages/hydra/hydra.el" w-dotfiles-folder-path))
+     (load! lv-hydra-path)
+     (load! hydra-path)
 
 
-     ;; (defhydra w/git-timemachine-hydra
-     ;;   (:color pink :hint nil :exit t)
-     ;;   ("n" git-timemachine-show-next-revision "Next Revision" :column "Go to")
-     ;;   ("p" git-timemachine-show-previous-revision "Next Revision")
-     ;;   ("c" git-timemachine-show-current-revision "Current Revision")
-     ;;   ("g" git-timemachine-show-nth-revision "Nth Revision")
-     ;;   ("t" git-timemachine-show-revision-fuzzy "Search")
-     ;;   ("W" git-timemachine-kill-revision "Copy full revision" :column "Actions")
-     ;;   ("w" git-timemachine-kill-abbreviated-revision "Copy abbreviated revision" :column "Actions")
-     ;;   ("C" git-timemachine-show-commit "Show commit")
-     ;;   ("b" git-timemachine-blame "Blame")
-     ;;   ("G" git-timemachine-go-to-revision-id "Revision Id")
-     ;;   ("q" nil "cancel" :color blue :column nil))
-     ;;                                         ;indicating inserted, modified or deleted lines
-     ;; (use-package diff-hl
-     ;;   :ensure t
-     ;;   :commands (diff-hl-mode)
-     ;;   :config
-     ;;   (diff-hl-margin-mode)
-     ;;   (setq diff-hl-margin-side 'right)
-     ;;   )
-     ;;                                         ;Init git modified highlighting at programming mode
-     ;; (add-hook 'prog-mode-hook
-     ;;           (lambda()
-     ;;             (diff-hl-mode t)
-     ;;             )
-     ;;           )
+     (use-package git-timemachine
+       :commands (git-timemachine)
+       :config
 
-     ;; (eval-after-load 'git-timemachine
-     ;;   '(progn
-     ;;      (evil-make-overriding-map git-timemachine-mode-map 'normal)
-     ;;      ;; force update evil keymaps after git-timemachine-mode loaded
-     ;;      (add-hook 'git-timemachine-mode-hook #'evil-normalize-keymaps)))
+       (defun git-timemachine-blame ()
+         "Call magit-blame on current revision."
+         (interactive)
+         (if (fboundp 'magit-blame)
+             (let ((magit-buffer-revision (car git-timemachine-revision)))
+               (magit-blame))
+           (message "You need to install magit for blame capabilities")))
+
+       (defun git-timemachine-find-revision-by-id (revision-id)
+         (require 'cl)
+         (message revision-id)
+         (cl-loop for v in (git-timemachine--revisions)
+                  until (cl-search revision-id (nth 0 v))
+                  finally return v
+                  )
+         )
+       (defun git-timemachine-go-to-revision-id (revision-id)
+         (interactive "sEnter revision id: ")
+         (git-timemachine-show-revision (git-timemachine-find-revision-by-id revision-id))
+         )
+       (evil-define-key 'normal git-timemachine-mode-map (kbd "G") 'git-timemachine-go-to-revision-id)
+       )
+
+     (defun w/git-timemachine-on ()
+       (interactive)
+       (git-timemachine)
+       (w/git-timemachine-hydra/body))
+
+
+     (defhydra w/git-timemachine-hydra
+       (:color pink :hint nil :exit t)
+       ("n" git-timemachine-show-next-revision "Next Revision" :column "Go to")
+       ("p" git-timemachine-show-previous-revision "Next Revision")
+       ("c" git-timemachine-show-current-revision "Current Revision")
+       ("g" git-timemachine-show-nth-revision "Nth Revision")
+       ("t" git-timemachine-show-revision-fuzzy "Search")
+       ("W" git-timemachine-kill-revision "Copy full revision" :column "Actions")
+       ("w" git-timemachine-kill-abbreviated-revision "Copy abbreviated revision" :column "Actions")
+       ("C" git-timemachine-show-commit "Show commit")
+       ("b" git-timemachine-blame "Blame")
+       ("G" git-timemachine-go-to-revision-id "Revision Id")
+       ("q" nil "cancel" :color blue :column nil))
+                                             ;indicating inserted, modified or deleted lines
+     (use-package diff-hl
+       :ensure t
+       :commands (diff-hl-mode)
+       :config
+       (diff-hl-margin-mode)
+       (setq diff-hl-margin-side 'right)
+       )
+                                             ;Init git modified highlighting at programming mode
+     (add-hook 'prog-mode-hook
+               (lambda()
+                 (diff-hl-mode t)
+                 )
+               )
+
+     (eval-after-load 'git-timemachine
+       '(progn
+          (evil-make-overriding-map git-timemachine-mode-map 'normal)
+          ;; force update evil keymaps after git-timemachine-mode loaded
+          (add-hook 'git-timemachine-mode-hook #'evil-normalize-keymaps)))
 
      (defun w/git-last-commit-message ()
        (interactive)
@@ -718,27 +721,27 @@ save/recover sessions
        :defer t
        )
 
-     ;; (defhydra w/persp-hydra
-     ;;   (:color pink :hint nil :exit t)
-     ;;   "Layout: %s(w/persp-layout)"
-     ;;   ("n" persp-next "Next Layout" :column "Go to")
-     ;;   ("p" persp-prev "Prev Layout")
-     ;;   ("l" persp-switch "Switch Layout")
-     ;;   ("1" (w/persp-switch-to-number 1))
-     ;;   ("2" (w/persp-switch-to-number 2))
-     ;;   ("3" (w/persp-switch-to-number 3))
-     ;;   ("4" (w/persp-switch-to-number 4))
-     ;;   ("5" (w/persp-switch-to-number 5))
-     ;;   ("6" (w/persp-switch-to-number 6))
-     ;;   ("7" (w/persp-switch-to-number 7))
-     ;;   ("8" (w/persp-switch-to-number 8))
-     ;;   ("9" (w/persp-switch-to-number 9))
+     (defhydra w/persp-hydra
+       (:color pink :hint nil :exit t)
+       "Layout: %s(w/persp-layout)"
+       ("n" persp-next "Next Layout" :column "Go to")
+       ("p" persp-prev "Prev Layout")
+       ("l" persp-switch "Switch Layout")
+       ("1" (w/persp-switch-to-number 1))
+       ("2" (w/persp-switch-to-number 2))
+       ("3" (w/persp-switch-to-number 3))
+       ("4" (w/persp-switch-to-number 4))
+       ("5" (w/persp-switch-to-number 5))
+       ("6" (w/persp-switch-to-number 6))
+       ("7" (w/persp-switch-to-number 7))
+       ("8" (w/persp-switch-to-number 8))
+       ("9" (w/persp-switch-to-number 9))
 
-     ;;   ("d" persp-kill :column "Actions")
-     ;;   ("r" persp-rename)
-     ;;   ("s" w/persp-save-state-to-file "Save Layout")
-     ;;   ("L" w/persp-load-state-from-file "Load Layout")
-     ;;   ("q" nil "cancel" :color blue :column nil))
+       ("d" persp-kill :column "Actions")
+       ("r" persp-rename)
+       ("s" w/persp-save-state-to-file "Save Layout")
+       ("L" w/persp-load-state-from-file "Load Layout")
+       ("q" nil "cancel" :color blue :column nil))
 
    #+END_SRC
 ** Shell config
