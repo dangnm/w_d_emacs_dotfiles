@@ -20,6 +20,7 @@
 - [[#key-bindings][Key bindings]]
   - [[#commons-bindings][Commons bindings]]
   - [[#other-custom-bindings][Other custom bindings]]
+  - [[#toggles][Toggles]]
   - [[#file-bindings][File bindings]]
   - [[#windows-binding][Windows binding]]
   - [[#jump-binding][Jump binding]]
@@ -29,6 +30,7 @@
   - [[#clipboard-bindings][Clipboard bindings]]
   - [[#dired-secondary-leader-key][Dired secondary leader key]]
 - [[#my-search-config][My search config]]
+  - [[#vertico-config-search-files-search-texts][Vertico config (search files, search texts)]]
   - [[#ivy-config][Ivy config]]
   - [[#helm-config][Helm config]]
   - [[#fzf-search-config][Fzf search config]]
@@ -347,6 +349,11 @@ iTerm2 -> Preferences -> Selection -> [check] Applications in terminal may acces
 (map! :leader :desc "Togle selective display" "h,zc" #'toggle-selective-display)
 #+END_SRC
 
+** Toggles
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Toggle test & implementation" "t,t" #'projectile-toggle-between-implementation-and-test)
+#+END_SRC
+
 ** File bindings
 #+BEGIN_SRC emacs-lisp
 (map! :leader :desc "Custom" "f," nil)
@@ -489,6 +496,29 @@ The compatibility of system clipboard
 #+END_SRC
 
 * My search config
+** Vertico config (search files, search texts)
+#+BEGIN_SRC emacs-lisp
+  (use-package vertico
+    :init
+    (setq completion-in-region-function
+          (lambda (&rest args)
+            (apply (if vertico-mode
+                       #'consult-completion-in-region
+                     #'completion--in-region)
+                   args)))
+    (vertico-mode)
+    (setq vertico-cycle t)
+    :bind (:map vertico-map
+                ("C-j" . vertico-next)
+                ("C-k" . vertico-previous)
+                ("C-d" . vertico-scroll-down)
+                ("C-u" . vertico-scroll-up) ())
+    :config
+    (setq completion-styles '(substring orderless)
+          read-file-name-completion-ignore-case t
+          read-buffer-completion-ignore-case t))
+#+END_SRC
+
 ** Ivy config
 #+BEGIN_SRC emacs-lisp
 (map! (:after ivy :map ivy-minibuffer-map
@@ -629,7 +659,7 @@ The compatibility of system clipboard
        :ensure t
        :commands (diff-hl-mode)
        :config
-       (diff-hl-margin-mode)
+       (diff-hl-mode)
        (setq diff-hl-margin-side 'right)
        )
                                              ;Init git modified highlighting at programming mode
