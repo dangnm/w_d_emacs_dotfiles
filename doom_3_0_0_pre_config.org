@@ -47,8 +47,8 @@
 
 * Installation
 ** Install Doom Emacs
-- rm -rf ~/.emacs.d
-- mkdir ~/.doom.d
+- Run ~rm -rf ~/.emacs.d~ because Doom 3.0 has moved configs from ~/.emacs.d to ~/.config/emacs
+- Run ~mkdir ~/.doom.d~ to force Doom 3.0 to generate init.el in doom.d
 - Click [[https://github.com/hlissner/doom-emacs#install][here]] to install Doom Emacs if it's not ready in the target environment
 ** Clone this repo into home folder
 Run ~git clone git@github.com:dangnm/w_d_emacs_dotfiles.git ~/w_d_emacs_dotfiles~
