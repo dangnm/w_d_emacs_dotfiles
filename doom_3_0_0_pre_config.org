@@ -47,6 +47,7 @@
 
 * Installation
 ** Install Doom Emacs
+- rm -rf ~/.emacs.d
 - mkdir ~/.doom.d
 - Click [[https://github.com/hlissner/doom-emacs#install][here]] to install Doom Emacs if it's not ready in the target environment
 ** Clone this repo into home folder
