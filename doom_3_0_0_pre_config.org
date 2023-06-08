@@ -40,6 +40,7 @@
   - [[#workspace-persp-mode-config][Workspace (PERSP MODE) config]]
   - [[#shell-config][Shell config]]
 - [[#tips][Tips]]
+  - [[#emacs][Emacs]]
   - [[#check-all-bindings][Check all bindings]]
   - [[#org-mode-basic-bindings][Org mode basic bindings]]
 #+END_QUOTE
@@ -846,6 +847,8 @@ Otherwise move to the end of the buffer."
 
 #+END_SRC
 * Tips
+** Emacs
+- User ~Ctrl Z~ or ~evil-emacs-state~ to toggle Emacs mode & Vi mode
 ** Check all bindings
 SPC h b b  will show all defined keys and their definitions.
 ** Org mode basic bindings
