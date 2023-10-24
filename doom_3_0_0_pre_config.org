@@ -37,6 +37,7 @@
 - [[#my-git-tools-config][My git tools config]]
   - [[#magit-config][Magit config]]
 - [[#other-tools-configs][Other tools configs]]
+  - [[#flycheck][Flycheck]]
   - [[#workspace-persp-mode-config][Workspace (PERSP MODE) config]]
   - [[#shell-config][Shell config]]
 - [[#tips][Tips]]
@@ -686,6 +687,13 @@ The compatibility of system clipboard
 #+END_SRC
 
 * Other tools configs
+** Flycheck
+#+BEGIN_SRC emacs-lisp
+(add-hook 'ruby-mode-hook
+          (lambda ()
+            (setq-local flycheck-command-wrapper-function
+                        (lambda (command) (append '("bundle" "exec") command)))))
+#+END_SRC
 ** Workspace (PERSP MODE) config
 save/recover sessions
 #+BEGIN_SRC emacs-lisp
