@@ -858,6 +858,9 @@ Otherwise move to the end of the buffer."
 #+END_SRC
 ** TypeScript/TSX config
 #+BEGIN_SRC emacs-lisp
+;; Add asdf shims to exec-path so Emacs can find tsserver
+(add-to-list 'exec-path (expand-file-name "~/.asdf/shims"))
+(setenv "PATH" (concat (expand-file-name "~/.asdf/shims") ":" (getenv "PATH")))
 ;; .tsx files: rjsx-mode (installed via Doom javascript module)
 (add-to-list 'auto-mode-alist '("\\.tsx\\'" . rjsx-mode))
 ;; .ts files: typescript-mode
