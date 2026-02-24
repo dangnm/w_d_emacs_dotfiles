@@ -856,6 +856,13 @@ Otherwise move to the end of the buffer."
       )))
 
 #+END_SRC
+** TypeScript/TSX config
+#+BEGIN_SRC emacs-lisp
+;; .tsx files: rjsx-mode (installed via Doom javascript module)
+(add-to-list 'auto-mode-alist '("\\.tsx\\'" . rjsx-mode))
+;; .ts files: typescript-mode
+(add-to-list 'auto-mode-alist '("\\.ts\\'" . typescript-mode))
+#+END_SRC
 * Tips
 ** Emacs
 - User ~Ctrl Z~ or ~evil-emacs-state~ to toggle Emacs mode & Vi mode
