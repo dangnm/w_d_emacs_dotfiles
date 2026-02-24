@@ -61,6 +61,7 @@ ln -sf ~/w_d_emacs_dotfiles/doom_3_0_0_pre_config.org ~/.doom.d/config.org
 ** Rebuild config
 - Run ~SPC h r r~ OR ~M-x doom/reload~ to re-apply configurations from config.org
 - Run ~doom env~ to re-apply env vars for Doom Emacs
+- Or run ~/.config/emacs/bin/doom sync
 * Helpers
 ** Basic helpers
    #+BEGIN_SRC emacs-lisp
