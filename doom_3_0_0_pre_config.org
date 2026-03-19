@@ -866,6 +866,38 @@ Otherwise move to the end of the buffer."
 ;; .ts files: typescript-mode
 (add-to-list 'auto-mode-alist '("\\.ts\\'" . typescript-mode))
 #+END_SRC
+** Agent shell config
+Packages must be declared in ~~/.doom.d/packages.el~. Add these 3 lines then run ~doom sync~ from terminal:
+#+BEGIN_SRC emacs-lisp :tangle no
+(package! shell-maker :recipe (:host github :repo "xenodium/shell-maker"))
+(package! acp         :recipe (:host github :repo "xenodium/acp.el"))
+(package! agent-shell :recipe (:host github :repo "xenodium/agent-shell"))
+#+END_SRC
+Make sure ~ANTHROPIC_API_KEY~ is exported in your shell and run ~doom env~.
+#+BEGIN_SRC emacs-lisp
+;; Add asdf nodejs bin dynamically so Emacs can find claude-agent-acp
+(when (executable-find "asdf")
+  (let ((nodejs-bin (string-trim (shell-command-to-string "asdf where nodejs 2>/dev/null"))))
+    (unless (string-empty-p nodejs-bin)
+      (let ((bin-path (concat nodejs-bin "/bin")))
+        (add-to-list 'exec-path bin-path)
+        (setenv "PATH" (concat bin-path ":" (getenv "PATH")))))))
+
+;; agent-shell requires Emacs 29+ (uses defvar-keymap)
+(when (and (>= emacs-major-version 29)
+           (locate-library "agent-shell"))
+  (autoload 'agent-shell "agent-shell" "Launch an LLM agent shell." t)
+
+  (with-eval-after-load 'agent-shell
+    (when (getenv "ANTHROPIC_API_KEY")
+      (setq agent-shell-anthropic-claude-environment
+            (agent-shell-make-environment-variables
+             "ANTHROPIC_API_KEY" (getenv "ANTHROPIC_API_KEY"))))
+    (setq agent-shell-inherit-environment t))
+
+  ;; SPC o A → agent-shell  |  C-u M-x agent-shell → new session
+  (map! :leader :desc "Agent shell" "o A" #'agent-shell))
+#+END_SRC
 * Tips
 ** Emacs
 - User ~Ctrl Z~ or ~evil-emacs-state~ to toggle Emacs mode & Vi mode
