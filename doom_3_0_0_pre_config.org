@@ -895,8 +895,8 @@ Make sure ~ANTHROPIC_API_KEY~ is exported in your shell and run ~doom env~.
              "ANTHROPIC_API_KEY" (getenv "ANTHROPIC_API_KEY"))))
     (setq agent-shell-inherit-environment t))
 
-  ;; SPC o A → agent-shell  |  C-u M-x agent-shell → new session
-  (map! :leader :desc "Agent shell" "o A" #'agent-shell))
+  ;; SPC t a → agent-shell  |  C-u M-x agent-shell → new session
+  (map! :leader :desc "Agent shell" "t a" #'agent-shell))
 #+END_SRC
 * Tips
 ** Emacs
