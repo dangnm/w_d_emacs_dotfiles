@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doom-code-reader-engine"
+version = "0.1.0"
+description = "AI-assisted code reader engine for Doom Emacs, backed by the Claude Code CLI"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+doom-code-reader-engine = "engine.main:main"
+
+[tool.setuptools.packages.find]
+include = ["engine*"]
+
+[tool.setuptools.package-data]
+"engine.prompts" = ["*.md"]
+

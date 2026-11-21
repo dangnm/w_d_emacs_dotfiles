@@ -40,6 +40,7 @@
   - [[#flycheck][Flycheck]]
   - [[#workspace-persp-mode-config][Workspace (PERSP MODE) config]]
   - [[#shell-config][Shell config]]
+  - [[#code-reader-config][Code reader config]]
 - [[#tips][Tips]]
   - [[#emacs][Emacs]]
   - [[#check-all-bindings][Check all bindings]]
@@ -739,7 +740,7 @@ save/recover sessions
              persp-add-buffer-on-after-change-major-mode t
              persp-auto-resume-time -1
              persp-autokill-buffer-on-remove 'kill-weak
-             persp-save-dir (expand-file-name "~/.emacs.d/.cache/layouts/"))
+             persp-save-dir (expand-file-name "layouts/" doom-cache-dir))
        )
 
      (defun w/persp-layout ()
@@ -897,6 +898,26 @@ Make sure ~ANTHROPIC_API_KEY~ is exported in your shell and run ~doom env~.
 
   ;; SPC t a → agent-shell  |  C-u M-x agent-shell → new session
   (map! :leader :desc "Agent shell" "t a" #'agent-shell))
+#+END_SRC
+** Code reader config
+Two-pane code reader: source on the left, AI explanations (Vietnamese) on the right. The engine lives in ~packages/doom_code_reader~ and calls the Claude Code CLI in read-only mode. See that folder's README for setup.
+- ~SPC c r~ open the reader and explain the whole file (scroll the source to find the part you need)
+- ~SPC c b~ explain the selected region, ~SPC c F~ explain the current function
+- In the explanation pane: ~RET~ jump to the source, ~g~ refresh, ~c~ cancel, ~t~ toggle pane, ~q~ close
+
+~SPC c e~ and ~SPC c f~ keep Doom's bindings (evaluate buffer, format), so the reader uses the keys above.
+#+BEGIN_SRC emacs-lisp
+(setq code-reader-path (format "%s/packages/doom_code_reader/doom/code-reader" w-dotfiles-folder-path))
+(add-to-list 'load-path code-reader-path)
+(dolist (command '(code-reader-open code-reader-explain-file code-reader-explain-block
+                   code-reader-explain-function code-reader-cancel code-reader-refresh
+                   code-reader-toggle-panel code-reader-close code-reader-clear-cache
+                   code-reader-reset-session code-reader-show-status code-reader-set-language
+                   code-reader-shutdown-engine))
+  (autoload command "code-reader" nil t))
+(map! :leader :desc "Code reader" "c r" #'code-reader-open)
+(map! :leader :desc "Explain block" "c b" #'code-reader-explain-block)
+(map! :leader :desc "Explain function" "c F" #'code-reader-explain-function)
 #+END_SRC
 * Tips
 ** Emacs
