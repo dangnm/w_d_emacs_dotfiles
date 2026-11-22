@@ -49,20 +49,23 @@
 
 * Installation
 ** Install Doom Emacs
-- Run ~rm -rf ~/.emacs.d~ because Doom 3.0 has moved configs from ~/.emacs.d to ~/.config/emacs
-- Run ~mkdir ~/.doom.d~ to force Doom 3.0 to generate init.el in doom.d
-- Click [[https://github.com/hlissner/doom-emacs#install][here]] to install Doom Emacs if it's not ready in the target environment
+- Doom Emacs v2.2.4 (commit ~6bdd928~) lives in ~~/.config/emacs~. Your private config lives in ~~/.config/doom~ (the default ~$DOOMDIR~)
+- Click [[https://github.com/doomemacs/doomemacs#install][here]] to install Doom Emacs if it's not ready in the target environment
 ** Clone this repo into home folder
 Run ~git clone git@github.com:dangnm/w_d_emacs_dotfiles.git ~/w_d_emacs_dotfiles~
 ** Setup Emacs dotfiles
-ln -sf ~/w_d_emacs_dotfiles/doom_3_0_0_pre_config.org ~/.doom.d/config.org
+Symlink (don't copy) the literate config into Doom's private folder. The path helpers resolve this symlink to find the repo.
+#+BEGIN_SRC sh :tangle no
+mkdir -p ~/.config/doom
+ln -sf ~/w_d_emacs_dotfiles/config.org ~/.config/doom/config.org
+#+END_SRC
 ** Enable org file config
-- Go to ~/.doom.d/init.el
-- Uncomment ~literate~ in init.el
+- Go to ~~/.config/doom/init.el~
+- Uncomment ~literate~ in the ~:config~ block of init.el
 ** Rebuild config
 - Run ~SPC h r r~ OR ~M-x doom/reload~ to re-apply configurations from config.org
-- Run ~doom env~ to re-apply env vars for Doom Emacs
-- Or run ~/.config/emacs/bin/doom sync
+- Run ~~/.config/emacs/bin/doom sync~ to tangle config.org into ~~/.config/doom/config.el~ and sync packages
+- Run ~~/.config/emacs/bin/doom env~ to re-apply env vars for Doom Emacs
 * Helpers
 ** Basic helpers
    #+BEGIN_SRC emacs-lisp
@@ -97,13 +100,12 @@ ln -sf ~/w_d_emacs_dotfiles/doom_3_0_0_pre_config.org ~/.doom.d/config.org
    #+BEGIN_SRC emacs-lisp
      ;Init file paths
      (defun w/dotfiles-folder-path ()
-       (let ((path1 (replace-regexp-in-string  "\n\+$" "" (shell-command-to-string "dirname $(readlink ~/.doom.d/config.org) 2>/dev/null"))))
-         (if (not(string= "" path1))
-           path1
-           (replace-regexp-in-string  "\n\+$" "" (shell-command-to-string "readlink ~/.doom.d 2>/dev/null"))
-           )
-         )
-       )
+       "Return this dotfiles repo's folder.
+     Resolves the config.org symlink in `doom-user-dir' (~/.config/doom), so the
+     repo can live anywhere on disk."
+       (directory-file-name
+        (file-name-directory
+         (file-truename (expand-file-name "config.org" doom-user-dir)))))
      (setq w-dotfiles-folder-path (w/dotfiles-folder-path))
      (setq w-dotfiles-pakages-folder-path (format "%s/packages" w-dotfiles-folder-path))
      (defun s/show-buffer-file-path ()
@@ -190,8 +192,8 @@ ln -sf ~/w_d_emacs_dotfiles/doom_3_0_0_pre_config.org ~/.doom.d/config.org
        (if (get 'camelcase-motion-toggle-flag 'state)
            (progn
              (message "Disabled camelcase motion")
-             (subword-mode'-1)
-             (put 'camelcase-motion-toggle-flag'state nil))
+             (subword-mode -1)
+             (put 'camelcase-motion-toggle-flag 'state nil))
          (progn
            (message "Enabled camelcase motion")
            (subword-mode)
@@ -218,7 +220,7 @@ List available fonts ~(print (font-family-list))~
     (setq doom-font (font-spec :family "monospace" :size 16)
           doom-big-font (font-spec :family "monospace" :size 36)
           doom-variable-pitch-font (font-spec :family "sans" :size 24)
-          doom-unicode-font (font-spec :family "monospace")
+          doom-symbol-font (font-spec :family "monospace")
           doom-serif-font (font-spec :family "monospace" :weight 'light))
     ))
  ((string-equal system-type "darwin") ;  macOS
@@ -228,7 +230,7 @@ List available fonts ~(print (font-family-list))~
         (setq doom-font (font-spec :family "Menlo" :size 16)
               doom-big-font (font-spec :family "Menlo" :size 36)
               doom-variable-pitch-font (font-spec :family "Menlo" :size 24)
-              doom-unicode-font (font-spec :family "Menlo")
+              doom-symbol-font (font-spec :family "Menlo")
               doom-serif-font (font-spec :family "Menlo" :weight 'light))
       )
     ))
@@ -239,7 +241,7 @@ List available fonts ~(print (font-family-list))~
         (setq doom-font (font-spec :family "DejaVu Sans Mono" :size 18)
               doom-big-font (font-spec :family "DejaVu Sans Mono" :size 36)
               doom-variable-pitch-font (font-spec :family "DejaVu Sans Mono" :size 24)
-              doom-unicode-font (font-spec :family "DejaVu Sans Mono")
+              doom-symbol-font (font-spec :family "DejaVu Sans Mono")
               doom-serif-font (font-spec :family "DejaVu Sans Mono" :weight 'light))
       )
     ))
@@ -250,7 +252,7 @@ List available fonts ~(print (font-family-list))~
 [[https://github.com/hlissner/doom-emacs/issues/1213#issuecomment-468970403][Doom emacs package load]]
 #+BEGIN_SRC emacs-lisp
 (setq osx-clipboard-path (format "%s/packages/osx-clipboard.el" w-dotfiles-folder-path))
-(load! osx-clipboard-path)
+(load osx-clipboard-path nil t)
 
 (if (not(display-graphic-p))
     (progn
@@ -307,7 +309,7 @@ List available fonts ~(print (font-family-list))~
 iTerm2 -> Preferences -> Selection -> [check] Applications in terminal may access clipboard.
 #+BEGIN_SRC emacs-lisp
 (setq clipetty-path (format "%s/packages/clipetty.el" w-dotfiles-folder-path))
-(load! clipetty-path)
+(load clipetty-path nil t)
 (require 'clipetty)
 (global-clipetty-mode)
 #+END_SRC
@@ -327,7 +329,7 @@ iTerm2 -> Preferences -> Selection -> [check] Applications in terminal may acces
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (setq highlight-indentation-path (format "%s/packages/highlight-indentation.el" w-dotfiles-folder-path))
-(load! highlight-indentation-path)
+(load highlight-indentation-path nil t)
 (set-face-background 'highlight-indentation-face "#e3e3d3")
 (set-face-background 'highlight-indentation-current-column-face "#c3b3b3")
 
@@ -393,13 +395,13 @@ iTerm2 -> Preferences -> Selection -> [check] Applications in terminal may acces
 (map! :leader :desc "Registers" "r" nil)
 (map! :leader :desc "Jump to register" "rj" #'jump-to-register)
 (map! :leader :desc "Write to register" "rw" #'window-configuration-to-register)
-(map! :leader :desc "helm resume" "rl" #'helm-resume)
+(map! :leader :desc "Resume last search" "rl" #'vertico-repeat)
 #+END_SRC
 
 ** Git binding
 #+BEGIN_SRC emacs-lisp
 (map! :leader :desc "Custom mapping" "g," nil)
-(map! :leader :desc "Git link" "g,l" #'+vc/browse-at-remote-kill)
+(map! :leader :desc "Git link" "g,l" #'+vc/git-link-kill)
 (map! :leader :desc "Last commit message" "g,y" #'w/git-last-commit-message)
 (map! :leader :desc "Time machine" "gt" #'w/git-timemachine-on)
 #+END_SRC
@@ -517,7 +519,7 @@ The compatibility of system clipboard
                 ("C-j" . vertico-next)
                 ("C-k" . vertico-previous)
                 ("C-d" . vertico-scroll-down)
-                ("C-u" . vertico-scroll-up) ())
+                ("C-u" . vertico-scroll-up))
     :config
     (setq completion-styles '(substring orderless)
           read-file-name-completion-ignore-case t
@@ -597,7 +599,7 @@ The compatibility of system clipboard
    #+BEGIN_SRC emacs-lisp
      (when (memq window-system '(mac ns))
        (setenv "PATH" (concat (getenv "PATH") ":~/.fzf/bin"))
-       (setq exec-path (append exec-path '(":~/.fzf/bin"))))
+       (setq exec-path (append exec-path (list (expand-file-name "~/.fzf/bin")))))
      (setq fzf-path (format "%s/packages/fzf.el" w-dotfiles-folder-path))
      (use-package fzf
        :commands fzf
@@ -609,8 +611,8 @@ The compatibility of system clipboard
 #+BEGIN_SRC emacs-lisp
      (setq lv-hydra-path (format "%s/packages/hydra/lv.el" w-dotfiles-folder-path))
      (setq hydra-path (format "%s/packages/hydra/hydra.el" w-dotfiles-folder-path))
-     (load! lv-hydra-path)
-     (load! hydra-path)
+     (load lv-hydra-path nil t)
+     (load hydra-path nil t)
 
 
      (use-package git-timemachine
@@ -626,7 +628,7 @@ The compatibility of system clipboard
            (message "You need to install magit for blame capabilities")))
 
        (defun git-timemachine-find-revision-by-id (revision-id)
-         (require 'cl)
+         (require 'cl-lib)
          (message revision-id)
          (cl-loop for v in (git-timemachine--revisions)
                   until (cl-search revision-id (nth 0 v))
@@ -661,7 +663,6 @@ The compatibility of system clipboard
        ("q" nil "cancel" :color blue :column nil))
                                              ;indicating inserted, modified or deleted lines
      (use-package diff-hl
-       :ensure t
        :commands (diff-hl-mode)
        :config
        (diff-hl-mode)
@@ -750,7 +751,7 @@ save/recover sessions
               (highlight-persps (lambda (elt idx)
                                   (format (if (string= elt persp-current-name) "%d *%s*" "%d %s")
                                           (+ idx 1)
-                                          (if (string= elt "none") elt (f-base elt))))))
+                                          (if (string= elt "none") elt (file-name-base (directory-file-name elt)))))))
          (string-join (seq-map-indexed highlight-persps (persp-names-current-frame-fast-ordered)) " | ")))
 
 
@@ -759,7 +760,6 @@ save/recover sessions
        )
 
      (use-package hydra
-       :ensure t
        :defer t
        )
 
@@ -862,13 +862,15 @@ Otherwise move to the end of the buffer."
 ;; Add asdf shims to exec-path so Emacs can find tsserver
 (add-to-list 'exec-path (expand-file-name "~/.asdf/shims"))
 (setenv "PATH" (concat (expand-file-name "~/.asdf/shims") ":" (getenv "PATH")))
-;; .tsx files: rjsx-mode (installed via Doom javascript module)
-(add-to-list 'auto-mode-alist '("\\.tsx\\'" . rjsx-mode))
-;; .ts files: typescript-mode
-(add-to-list 'auto-mode-alist '("\\.ts\\'" . typescript-mode))
+;; typescript-mode is installed by Doom's javascript module, so only map .ts to it
+;; when that module is enabled in $DOOMDIR/init.el (otherwise auto-mode-alist
+;; points at a missing mode and opening a .ts file errors). .tsx is left to
+;; Doom's own tree-sitter entries: Doom 2.2.4 has no rjsx-mode.
+(when (modulep! :lang javascript)
+  (add-to-list 'auto-mode-alist '("\\.ts\\'" . typescript-mode)))
 #+END_SRC
 ** Agent shell config
-Packages must be declared in ~~/.doom.d/packages.el~. Add these 3 lines then run ~doom sync~ from terminal:
+Packages must be declared in ~~/.config/doom/packages.el~. Add these 3 lines then run ~~/.config/emacs/bin/doom sync~ from terminal:
 #+BEGIN_SRC emacs-lisp :tangle no
 (package! shell-maker :recipe (:host github :repo "xenodium/shell-maker"))
 (package! acp         :recipe (:host github :repo "xenodium/acp.el"))
