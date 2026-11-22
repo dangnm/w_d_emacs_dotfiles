@@ -21,18 +21,22 @@ from engine.config import (
 )
 
 ALLOWED_TASKS = ("explain_file", "explain_block", "explain_function", "follow_up", "explain_section",
-                 "delete_question")
+                 "delete_question", "explain_detail", "explain_detail_section")
 DELETE_QUESTION_TASK = "delete_question"  # remove one question from an explanation; no model call
 FOLLOW_UP_TASK = "follow_up"
 SECTION_TASK = "explain_section"  # explain one section again, on its own lines
+DETAIL_TASK = "explain_detail"  # explain every lines group line by line, in its existing explanation
+# The same, for one lines group only: the target must be the group's lines, as the explanation has them.
+DETAIL_SECTION_TASK = "explain_detail_section"
 MAX_QUESTION_CHARS = 2000
-# explain_file always covers the whole file; the client's target is ignored.
+# explain_file and explain_detail always cover the whole file; the client's target is ignored.
 WHOLE_FILE_TASK = "explain_file"
+_WHOLE_FILE_TASKS = (WHOLE_FILE_TASK, DETAIL_TASK)
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\]]{0,127}$")
 # An explanation's cache key (SHA-256 hex). It names a file, so it is checked strictly.
 _EXPLANATION_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 # Tasks that change an explanation that already exists, so they need its key.
-_KEY_TASKS = (FOLLOW_UP_TASK, SECTION_TASK, DELETE_QUESTION_TASK)
+_KEY_TASKS = (FOLLOW_UP_TASK, SECTION_TASK, DELETE_QUESTION_TASK, DETAIL_TASK, DETAIL_SECTION_TASK)
 
 
 class BadRequest(Exception):
@@ -145,7 +149,7 @@ def parse_explain(msg: dict) -> ExplainRequest:
             raise BadRequest("'content' is too large", details={"reason": "content_too_large"})
         total_lines = len(content.split("\n"))
 
-        if task == WHOLE_FILE_TASK:
+        if task in _WHOLE_FILE_TASKS:
             if len(content) > MAX_FILE_CHARS:
                 raise BadRequest(
                     "this file is too large to explain in one request; "

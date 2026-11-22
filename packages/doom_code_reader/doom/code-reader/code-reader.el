@@ -47,6 +47,12 @@
 ;;;###autoload
 (autoload 'code-reader-refresh "code-reader" nil t)
 ;;;###autoload
+(autoload 'code-reader-explain-detail "code-reader" nil t)
+;;;###autoload
+(autoload 'code-reader-explain-section-detail "code-reader" nil t)
+;;;###autoload
+(autoload 'code-reader-collapse-all "code-reader" nil t)
+;;;###autoload
 (autoload 'code-reader-toggle-panel "code-reader" nil t)
 ;;;###autoload
 (autoload 'code-reader-close "code-reader" nil t)

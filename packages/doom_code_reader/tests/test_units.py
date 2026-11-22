@@ -14,16 +14,20 @@ from engine.claude.stream_parser import StreamParser
 from engine.config import DENIED_TOOLS, MAX_SNIPPET_CHARS, READ_ONLY_TOOLS
 from engine.context.collector import collect_context, render_numbered, split_lines
 from engine.models.request import BadRequest, Target, parse_explain
-from engine.org import Document, DocumentError, Question, Section, document_from_payload
+from engine.org import Document, DetailLine, DocumentError, Question, Section, document_from_payload
 from engine.org import parse as parse_document
 from engine.org import render as render_document
 from engine.models.response import (
+    NO_DETAIL_TEXT,
     InvalidResponse,
+    detail_fingerprint,
     normalize_answer,
+    normalize_detail,
     normalize_output,
     normalize_section_explanation,
     parse_structured,
 )
+from engine.orchestrator import _carry_details, _detail_pieces, _split_range
 from engine.prompts import PromptError, build_system_prompt, build_user_prompt, prompt_fingerprint, render
 from tests.helpers import FAKE_CLAUDE, explain_message, make_project
 
@@ -606,6 +610,170 @@ class OrgDocumentTests(unittest.TestCase):
         self.assertEqual(doc.warnings, [{"code": "range_out_of_bounds", "message": "m", "section_id": None}])
         self.assertIsNotNone(doc.find_section(1, 2))
         self.assertIsNone(doc.find_section(1, 3))
+
+    @staticmethod
+    def _detailed() -> Document:
+        doc = OrgDocumentTests._sample()
+        doc.sections[0].detail = [
+            DetailLine(line=1, explanation="Starts the function greet."),
+            DetailLine(line=2, explanation="The docstring."),
+        ]
+        return doc
+
+    def test_detail_is_a_subsection_shown_before_the_questions(self) -> None:
+        text = render_document(self._detailed())
+        self.assertIn('\n** Detail explanation\n  :PROPERTIES:\n  :KIND: detail\n  :END:\n'
+                      '  - 1\n    Starts the function greet.\n'
+                      '  - 2\n    The docstring.\n', text)
+        self.assertLess(text.index("** Detail explanation"), text.index("** Question: Why message?"))
+
+    def test_detail_reads_back_exactly(self) -> None:
+        doc = self._detailed()
+        doc.sections[0].detail.append(DetailLine(line=3, explanation="Dereferences; the star is not a list."))
+        doc.sections[0].detail_fingerprint = "0123456789ab"
+        self.assertEqual(parse_document(render_document(doc)), doc)
+
+    def test_detail_item_is_only_the_line_number_so_the_code_is_not_quoted(self) -> None:
+        doc = self._detailed()
+        doc.sections[0].detail = [DetailLine(line=5, explanation="Calls foo.")]
+        text = render_document(doc)
+        self.assertIn("\n  - 5\n    Calls foo.\n", text)
+        self.assertNotIn("foo()", text)
+        self.assertEqual(parse_document(text).sections[0].detail, [DetailLine(line=5, explanation="Calls foo.")])
+
+    def test_a_detail_item_written_with_its_code_still_reads_back_without_it(self) -> None:
+        text = render_document(self._detailed()).replace("  - 1\n", "  - 1 · (defun greet (name)\n", 1)
+        self.assertEqual(parse_document(text).sections[0].detail[0],
+                         DetailLine(line=1, explanation="Starts the function greet."))
+
+    def test_detail_fingerprint_is_written_on_the_detail_heading_and_read_back(self) -> None:
+        doc = self._detailed()
+        doc.sections[0].detail_fingerprint = "0123456789ab"
+        text = render_document(doc)
+        self.assertIn("  :KIND: detail\n  :FINGERPRINT: 0123456789ab\n  :END:\n", text)
+        self.assertEqual(parse_document(text).sections[0].detail_fingerprint, "0123456789ab")
+
+    def test_detail_from_the_model_cannot_start_a_heading(self) -> None:
+        doc = self._detailed()
+        doc.sections[0].detail = [DetailLine(line=4, explanation="** Question: fake")]
+        parsed = parse_document(render_document(doc))
+        self.assertEqual(parsed.sections[0].detail, [DetailLine(line=4, explanation="** Question: fake")])
+        self.assertEqual(parsed.sections[0].followups, doc.sections[0].followups)
+
+    def test_detail_outside_a_section_is_rejected(self) -> None:
+        orphan = ("* Summary\n  :PROPERTIES:\n  :KIND: summary\n  :END:\n  s\n\n"
+                  "** Detail explanation\n  :PROPERTIES:\n  :KIND: detail\n  :END:\n"
+                  "  - 1 · x\n    y\n")
+        with self.assertRaises(DocumentError):
+            parse_document(orphan)
+
+
+class DetailTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name).resolve()
+        self.root = base / "project"
+        self.root.mkdir()
+        self.source = make_project(self.root)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_section_detail_request_covers_only_its_own_lines_and_needs_the_key(self) -> None:
+        req = parse_explain(explain_message(self.root, self.source, task="explain_detail_section", target=(2, 3),
+                                            explanation_key=KEY))
+        self.assertEqual(req.task, "explain_detail_section")
+        self.assertEqual(req.target, Target(2, 3))
+        with self.assertRaises(BadRequest):
+            parse_explain(explain_message(self.root, self.source, task="explain_detail_section", target=(2, 3)))
+
+    def test_detail_request_covers_the_whole_file_and_needs_the_key(self) -> None:
+        req = parse_explain(explain_message(self.root, self.source, task="explain_detail", target=(2, 3),
+                                            explanation_key=KEY))
+        self.assertEqual(req.task, "explain_detail")
+        self.assertEqual(req.target, Target(1, 7))  # the client's target is ignored
+        self.assertEqual(req.explanation_key, KEY)
+        with self.assertRaises(BadRequest):
+            parse_explain(explain_message(self.root, self.source, task="explain_detail", target=(1, 1)))
+
+    def test_detail_has_one_entry_per_code_line_and_no_code(self) -> None:
+        lines = ["(defun a ())", "", "  ;; comment", "    (b)"]
+        structured = {"lines": [
+            {"line": 1, "explanation": "Defines   a.\n Nothing else."},
+            {"line": 1, "explanation": "A second text for line 1 is ignored."},
+            {"line": 2, "explanation": "Blank lines get no entry."},
+            {"line": 3, "explanation": "A comment."},
+            {"line": 4, "explanation": "   "},
+            {"line": 9, "explanation": "Outside the group."},
+            {"line": "3", "explanation": "Not an integer."},
+        ]}
+        self.assertEqual(normalize_detail(structured, start=1, end=4, lines=lines), [
+            {"line": 1, "explanation": "Defines a. Nothing else."},
+            {"line": 3, "explanation": "A comment."},
+            {"line": 4, "explanation": NO_DETAIL_TEXT},
+        ])
+
+    def test_fingerprint_follows_the_numbers_and_the_code_of_the_lines_a_detail_covers(self) -> None:
+        lines = ["a", "", "  c  "]
+        base = detail_fingerprint(lines, 1, 3)
+        self.assertEqual(detail_fingerprint(["a", "   ", "  c  "], 1, 3), base)  # blank lines are not covered
+        self.assertNotEqual(detail_fingerprint(["a", "", "c"], 1, 3), base)  # the code changed
+        self.assertNotEqual(detail_fingerprint(["", "a", "  c  "], 1, 3), base)  # the numbers moved
+        self.assertNotEqual(detail_fingerprint(["a"], 1, 3), base)  # the file got shorter
+
+    def test_detail_without_a_lines_list_is_invalid(self) -> None:
+        with self.assertRaises(InvalidResponse):
+            normalize_detail({"notes": []}, start=1, end=2, lines=["a", "b"])
+
+    def test_groups_are_cut_into_equal_pieces_of_at_most_the_chunk_size(self) -> None:
+        self.assertEqual(_split_range(1, 119, 40), [(1, 40), (41, 80), (81, 119)])
+        self.assertEqual(_split_range(143, 183, 40), [(143, 163), (164, 183)])
+        self.assertEqual(_split_range(5, 5, 40), [(5, 5)])
+        for start, end in ((1, 1), (1, 40), (1, 41), (7, 300)):
+            pieces = _split_range(start, end, 40)
+            self.assertEqual(pieces[0][0], start)
+            self.assertEqual(pieces[-1][1], end)
+            for (_, last), (following, _) in zip(pieces, pieces[1:]):
+                self.assertEqual(following, last + 1)
+            self.assertTrue(all(last - first + 1 <= 40 for first, last in pieces))
+
+    def test_groups_past_the_end_of_a_shortened_file_are_cut_short_or_skipped(self) -> None:
+        doc = Document(sections=[
+            Section(id="a", source_start=1, source_end=50, title="", explanation="x"),
+            Section(id="b", source_start=52, source_end=70, title="", explanation="y"),
+            Section(id="c", source_start=60, source_end=70, title="", explanation="z"),
+        ])
+        pieces = _detail_pieces(doc, 55)
+        self.assertEqual([(p.group_start, p.group_end, p.start, p.end) for p in pieces],
+                         [(1, 50, 1, 25), (1, 50, 26, 50), (52, 70, 52, 55)])
+
+    def test_a_detail_is_carried_over_only_while_its_lines_and_code_are_the_same(self) -> None:
+        made_from = ["a", "", "c"]
+        old = Document(sections=[Section(id="s", source_start=1, source_end=3, title="", explanation="x",
+                                         detail=[DetailLine(1, "A."), DetailLine(3, "C.")],
+                                         detail_fingerprint=detail_fingerprint(made_from, 1, 3))])
+
+        def fresh() -> Document:
+            return Document(sections=[Section(id="t", source_start=1, source_end=3, title="", explanation="new")])
+
+        same = fresh()
+        _carry_details(old, same, ["a", "", "c"])
+        self.assertEqual(same.sections[0].detail, old.sections[0].detail)
+        self.assertEqual(same.sections[0].detail_fingerprint, old.sections[0].detail_fingerprint)
+        for lines in (["a", "", "changed"],  # the code changed
+                      ["a", "b", "c"],  # line 2 has code now, the detail lacks it
+                      ["", "a", "c"],  # the lines moved
+                      ["a"]):  # the file got shorter
+            dropped = fresh()
+            _carry_details(old, dropped, lines)
+            self.assertEqual(dropped.sections[0].detail, [], lines)
+
+    def test_a_detail_without_a_fingerprint_is_not_carried_over(self) -> None:
+        old = Document(sections=[Section(id="s", source_start=1, source_end=1, title="", explanation="x",
+                                         detail=[DetailLine(1, "A.")])])
+        fresh = Document(sections=[Section(id="t", source_start=1, source_end=1, title="", explanation="new")])
+        _carry_details(old, fresh, ["a"])
+        self.assertEqual(fresh.sections[0].detail, [])
 
 
 class FollowUpAnswerTests(unittest.TestCase):

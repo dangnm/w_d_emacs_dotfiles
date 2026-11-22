@@ -21,6 +21,10 @@ from engine.cache import ExplanationCache, project_folder
 from engine.claude.cli import build_env, run_claude
 from engine.claude.session import SessionStore
 from engine.orchestrator import Orchestrator
+from engine.models.response import NO_DETAIL_TEXT
+from engine.org import Section
+from engine.org import parse as parse_document
+from engine.org import render as render_document
 from engine.requests import REASON_SUPERSEDED, RequestRegistry
 from engine.server import EngineServer
 from tests.helpers import (
@@ -672,6 +676,190 @@ class DeleteQuestionPipelineTests(PipelineCase):
             await orchestrator.handle_explain(request, emit, "o")
         self.assertEqual(emit.of_type("error")[0]["code"], "explanation_missing")
         self.assertEqual(self._calls(), [])
+
+
+class DetailPipelineTests(PipelineCase):
+    """A line-by-line detail explanation, run through the orchestrator and the fake CLI."""
+
+    async def _explain(self, orchestrator, source=None, request_id="d-0") -> dict:
+        emit = Collector()
+        await orchestrator.handle_explain(explain_message(self.project, source or self.source,
+                                                          request_id=request_id), emit, "o")
+        self.assertEqual(emit.of_type("error"), [], emit.messages)
+        return emit.of_type("result")[0]
+
+    async def _detail(self, orchestrator, explained: dict, *, source=None, request_id="dt-1",
+                      content=None, task="explain_detail", target=(1, 1)) -> Collector:
+        emit = Collector()
+        request = explain_message(self.project, source or self.source, task=task, request_id=request_id,
+                                  view=f"view-detail-{request_id}", explanation_key=explained["explanation_key"],
+                                  content=content, target=target)
+        await orchestrator.handle_explain(request, emit, "o")
+        return emit
+
+    def _split_into_two_sections(self, explained: dict) -> None:
+        """Rewrite the saved explanation as two sections, lines 1-3 and 5-6, so one can be explained alone."""
+        path = Path(explained["cache_path"])
+        doc = parse_document(path.read_text(encoding="utf-8"))
+        doc.sections[0].source_end = 3
+        doc.sections.append(Section(id="second-s", source_start=5, source_end=6, title="Second",
+                                    explanation="Second text."))
+        path.write_text(render_document(doc), encoding="utf-8")
+
+    async def test_a_section_detail_covers_only_that_section_and_keeps_the_others(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            self._split_into_two_sections(explained)
+            whole = (await self._detail(orchestrator, explained, request_id="whole-1")).of_type("result")[0]
+            second_before = whole["sections"][1]["detail"]
+            calls_before = len(self._calls())
+            emit = await self._detail(orchestrator, explained, request_id="one-1",
+                                      task="explain_detail_section", target=(1, 3))
+        self.assertEqual(emit.of_type("error"), [], emit.messages)
+        result = emit.of_type("result")[0]
+        self.assertEqual(result["task"], "explain_detail_section")
+        self.assertEqual([entry["line"] for entry in result["sections"][0]["detail"]], [1, 2, 3])
+        self.assertEqual(result["sections"][1]["detail"], second_before)
+        self.assertEqual(len(self._calls()) - calls_before, 1)
+
+    async def test_a_section_detail_for_lines_the_explanation_does_not_have_says_so(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            self._split_into_two_sections(explained)
+            calls_before = len(self._calls())
+            emit = await self._detail(orchestrator, explained, task="explain_detail_section", target=(1, 4))
+        self.assertEqual(emit.of_type("error")[0]["code"], "explanation_missing")
+        self.assertEqual(len(self._calls()), calls_before)
+
+    async def test_every_group_gets_a_line_by_line_detail_stored_in_its_file(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            emit = await self._detail(orchestrator, explained)
+        self.assertEqual(emit.of_type("error"), [], emit.messages)
+        result = emit.of_type("result")[0]
+        self.assertEqual(result["task"], "explain_detail")
+        self.assertEqual(result["explanation_key"], explained["explanation_key"])
+        # Lines 4 and 7 are blank, so they get no entry.
+        detail = result["sections"][0]["detail"]
+        self.assertEqual([entry["line"] for entry in detail], [1, 2, 3, 5, 6])
+        self.assertEqual(detail[0], {"line": 1, "explanation": "Giải thích dòng 1."})
+        self.assertNotIn("code", detail[1])
+        self.assertIn("\n  - 1\n    Giải thích dòng 1.\n", result["document"])
+        self.assertNotIn("(defun greet (name)", result["document"].split("** Detail explanation", 1)[1])
+        self.assertIn("\n** Detail explanation\n", result["document"])
+        self.assertIn("\n  - 5\n    Giải thích dòng 5.\n", result["document"])
+        self.assertNotIn("(defun add (a b)", result["document"])
+        self.assertEqual(Path(result["cache_path"]).read_text(encoding="utf-8"), result["document"])
+
+    async def test_detail_calls_use_their_own_sessions_and_leave_the_question_session_alone(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            session_before = orchestrator._sessions.snapshot()
+            await self._detail(orchestrator, explained)
+            self.assertEqual(orchestrator._sessions.snapshot(), session_before)
+            detail_call = self._calls()[-1]
+            self.assertIn("--session-id", detail_call)
+            self.assertNotIn("--resume", detail_call)
+            self.assertNotEqual(detail_call[detail_call.index("--session-id") + 1],
+                                session_before[0]["session_id"])
+            asked = explain_message(self.project, self.source, task="follow_up", target=(1, 7),
+                                    question="Still the same session?", view="view-detail-chat", request_id="dt-2",
+                                    explanation_key=explained["explanation_key"])
+            await orchestrator.handle_explain(asked, Collector(), "o")
+            question_call = self._calls()[-1]
+            self.assertEqual(question_call[question_call.index("--resume") + 1], session_before[0]["session_id"])
+
+    async def test_a_long_group_is_explained_in_calls_of_a_few_dozen_lines(self) -> None:
+        long_source = self.project / "lisp" / "long.el"
+        long_source.write_text("".join(f"(setq value-{number} {number})\n" for number in range(1, 101)),
+                               encoding="utf-8")
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator, source=long_source, request_id="long-0")
+            before = len(self._calls())
+            emit = await self._detail(orchestrator, explained, source=long_source, request_id="long-1")
+        self.assertEqual(emit.of_type("error"), [], emit.messages)
+        self.assertEqual(len(self._calls()) - before, 3)  # 100 lines in pieces of 34, 33 and 33
+        detail = emit.of_type("result")[0]["sections"][0]["detail"]
+        self.assertEqual([entry["line"] for entry in detail], list(range(1, 101)))
+        self.assertEqual(emit.of_type("progress")[-1]["steps"], {"done": 3, "total": 3})
+
+    async def test_a_line_the_model_leaves_out_says_so(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+        # The orchestrator copies the environment when it is made, so it is made inside the patch.
+        with EnvPatch(fake_env(self.state_file, self.argv_log, mode="detail_skip")):
+            orchestrator, _ = self._orchestrator()
+            emit = await self._detail(orchestrator, explained)
+        detail = emit.of_type("result")[0]["sections"][0]["detail"]
+        self.assertEqual(detail[0], {"line": 1, "explanation": NO_DETAIL_TEXT})
+        self.assertEqual(detail[1]["explanation"], "Giải thích dòng 2.")
+
+    async def test_a_detail_answer_without_lines_stores_nothing(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+        with EnvPatch(fake_env(self.state_file, self.argv_log, mode="detail_bad")):
+            orchestrator, _ = self._orchestrator()
+            emit = await self._detail(orchestrator, explained)
+        error = emit.of_type("error")[0]
+        self.assertEqual(error["code"], "invalid_response")
+        self.assertTrue(error["retryable"])
+        self.assertEqual(emit.of_type("result"), [])
+        self.assertNotIn("Detail explanation", Path(explained["cache_path"]).read_text(encoding="utf-8"))
+
+    async def test_detail_needs_the_explanation_on_disk(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            emit = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, task="explain_detail",
+                                                              request_id="dt-9", view="view-detail-9",
+                                                              explanation_key="e" * 64), emit, "o")
+        self.assertEqual(emit.of_type("error")[0]["code"], "explanation_missing")
+        self.assertEqual(self._calls(), [], "no model call when there is nothing to explain")
+
+    async def test_a_full_refresh_keeps_the_detail_only_while_the_code_is_unchanged(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            detailed = (await self._detail(orchestrator, explained)).of_type("result")[0]
+
+            same = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="dt-r1",
+                                                              use_cache=False), same, "o")
+            self.assertEqual(same.of_type("result")[0]["sections"][0]["detail"], detailed["sections"][0]["detail"])
+
+            edited = self.source.read_text(encoding="utf-8").replace("(+ a b)", "(+ a b 0)")
+            changed = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="dt-r2",
+                                                              content=edited, use_cache=False), changed, "o")
+            self.assertEqual(changed.of_type("result")[0]["sections"][0]["detail"], [])
+            self.assertNotIn("Detail explanation", changed.of_type("result")[0]["document"])
+
+    async def test_questions_and_detail_are_kept_together(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            asked = explain_message(self.project, self.source, task="follow_up", target=(1, 7),
+                                    question="Kept with the detail?", view="view-both-1", request_id="both-1",
+                                    explanation_key=explained["explanation_key"])
+            await orchestrator.handle_explain(asked, Collector(), "o")
+            emit = await self._detail(orchestrator, explained)
+            detail_result = emit.of_type("result")[0]
+            self.assertIn("** Question: Kept with the detail?", detail_result["document"])
+            cached = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="both-2"),
+                                              cached, "o")
+        result = cached.of_type("result")[0]
+        self.assertTrue(result["cache_hit"])
+        self.assertEqual(len(result["sections"][0]["detail"]), 5)
+        self.assertEqual([entry["question"] for entry in result["sections"][0]["followups"]],
+                         ["Kept with the detail?"])
 
 
 class SubprocessEngineTests(unittest.TestCase):

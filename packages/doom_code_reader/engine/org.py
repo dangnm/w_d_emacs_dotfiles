@@ -22,6 +22,13 @@ with TAB. The layout is::
       :END:
       What these lines do.
 
+    ** Detail explanation
+       :PROPERTIES:
+       :KIND: detail
+       :END:
+       - 19 · last_name = name.split()[-1]
+         The last word of the name, which is the family name here.
+
     ** Question: what is last_name?
        :PROPERTIES:
        :KIND: question
@@ -51,6 +58,9 @@ INDENT = "  "
 SUMMARY_KIND = "summary"
 SECTION_KIND = "section"
 QUESTION_KIND = "question"
+# The line-by-line explanation of a section: a subsection, shown before its questions.
+DETAIL_KIND = "detail"
+DETAIL_TITLE = "Detail explanation"
 # Group headings, in the order they are shown. Each holds a list of strings,
 # except "warnings", which holds code and message pairs.
 LIST_GROUPS = (("dependencies", "Dependencies"), ("data_flow", "Data flow"), ("notes", "Notes"))
@@ -59,6 +69,10 @@ WARNINGS_TITLE = "Warnings"
 
 _SECTION_HEADING = re.compile(r"^\* Lines \d+–\d+(?: · (.*))?$")
 _QUESTION_HEADING = re.compile(r"^\*\* Question: (.*)$")
+# A detail item is "  - LINE", and its explanation is the indented line under it. Items written
+# before the code was left out, "  - LINE · code", are still read, and the code is dropped.
+_DETAIL_ITEM = re.compile(r"^  - (\d+)(?: ·.*)?$")
+_DETAIL_TEXT = re.compile(r"^    (.*)$")
 _LINES_VALUE = re.compile(r"^(\d+)-(\d+)$")
 _PROPERTY = re.compile(r"^:([A-Za-z_][A-Za-z0-9_\-]*):(?: (.*))?$")
 _WARNING_ITEM = re.compile(r"^\[([^\]]*)\] ?(.*)$")
@@ -82,6 +96,14 @@ class Question:
 
 
 @dataclass
+class DetailLine:
+    """What one line of code does. The code itself is not stored: the source pane shows it."""
+
+    line: int
+    explanation: str
+
+
+@dataclass
 class Section:
     """One explained range of source lines, with the questions asked about it."""
 
@@ -92,6 +114,11 @@ class Section:
     explanation: str
     followups: list[Question] = field(default_factory=list)
     refreshed_at: str | None = None
+    # Line-by-line explanation, one entry per line of code, in file order. Empty until requested.
+    detail: list[DetailLine] = field(default_factory=list)
+    # Fingerprint of the lines the detail was made from (see engine/models/response.py). A refresh
+    # keeps the detail only while the file still has those lines. Empty when there is no detail.
+    detail_fingerprint: str = ""
 
 
 @dataclass
@@ -129,6 +156,13 @@ def _one_line(text: object) -> str:
     return " ".join(str(text).split())
 
 
+def code_text(raw: str) -> str:
+    """Return one line of source as it is stored: tabs become four spaces, and the line
+    ending and trailing spaces go. Leading spaces stay, because the indentation is part
+    of what the reader reads."""
+    return str(raw).replace("\r", "").expandtabs(4).rstrip()
+
+
 def _body(text: str) -> list[str]:
     """Indent free text so that no line of it can start a heading or a drawer."""
     lines = []
@@ -144,6 +178,16 @@ def _drawer(props: list[tuple[str, str]]) -> list[str]:
             INDENT + ":END:"]
 
 
+def _render_detail(entries: list[DetailLine]) -> list[str]:
+    """One item per line of code: its number, then its explanation underneath. The code is not
+    repeated, because the source pane shows it next to the explanation."""
+    out: list[str] = []
+    for entry in entries:
+        out.append(f"{INDENT}- {entry.line}")
+        out.append(f"{INDENT * 2}{_one_line(entry.explanation)}".rstrip())
+    return out
+
+
 def _render_section(section: Section) -> list[str]:
     heading = f"* Lines {section.source_start}–{section.source_end}"
     if section.title.strip():
@@ -153,6 +197,11 @@ def _render_section(section: Section) -> list[str]:
     if section.refreshed_at:
         props.append(("REFRESHED", section.refreshed_at))
     lines = [heading, *_drawer(props), *_body(section.explanation), ""]
+    if section.detail:
+        detail_props = [("KIND", DETAIL_KIND)]
+        if section.detail_fingerprint:
+            detail_props.append(("FINGERPRINT", section.detail_fingerprint))
+        lines += [f"** {DETAIL_TITLE}", *_drawer(detail_props), *_render_detail(section.detail), ""]
     for entry in section.followups:
         lines += [f"** Question: {_one_line(entry.question)}",
                   *_drawer([("KIND", QUESTION_KIND), ("CREATED", entry.created_at)]),
@@ -262,6 +311,20 @@ def _items(lines: list[str]) -> list[str]:
     return items
 
 
+def _parse_detail(body: list[str]) -> list[DetailLine]:
+    """Read the items written by :func:`_render_detail`. Lines that match neither form are ignored."""
+    entries: list[DetailLine] = []
+    for line in body:
+        item = _DETAIL_ITEM.match(line)
+        if item:
+            entries.append(DetailLine(line=int(item.group(1)), explanation=""))
+            continue
+        text = _DETAIL_TEXT.match(line)
+        if text and entries:
+            entries[-1].explanation = f"{entries[-1].explanation} {text.group(1).strip()}".strip()
+    return entries
+
+
 def _parse_warning(item: str) -> dict[str, Any]:
     match = _WARNING_ITEM.match(item)
     if match is None:
@@ -326,8 +389,14 @@ def parse(text: str) -> Document:
             else:
                 raise DocumentError(f"unknown heading: {block.heading[:60]!r}")
         else:
+            if section is None:
+                raise DocumentError("a subsection is not under a section")
+            if kind == DETAIL_KIND and block.heading.rstrip() == f"** {DETAIL_TITLE}":
+                section.detail = _parse_detail(body)
+                section.detail_fingerprint = props.get("FINGERPRINT", "")
+                continue
             match = _QUESTION_HEADING.match(block.heading)
-            if section is None or kind != QUESTION_KIND or match is None:
+            if kind != QUESTION_KIND or match is None:
                 raise DocumentError("a question is not under a section")
             section.followups.append(Question(
                 question=match.group(1).strip(),

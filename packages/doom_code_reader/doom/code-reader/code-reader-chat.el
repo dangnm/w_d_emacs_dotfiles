@@ -24,7 +24,7 @@
                   (state keymap key def &rest bindings))
 (declare-function evil-insert-state "evil-commands" (&optional arg))
 
-(defconst code-reader-chat-lines 8
+(defconst code-reader-chat-lines 9
   "Lines of the bottom panel below the explanation pane.
 The panel shows the key table or the question box, one at a time, so it is as
 tall as the key table.  The question box uses its header line and the first

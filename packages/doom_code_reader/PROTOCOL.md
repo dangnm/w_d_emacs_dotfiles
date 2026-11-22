@@ -99,6 +99,28 @@ The result is a `result` event with `task: "delete_question"`, carrying `explana
 or the question is no longer in the section, the request fails with `explanation_missing`,
 and nothing is written.
 
+### `explain` with task `explain_detail`
+
+Adds a line-by-line explanation to every lines group of an explanation.
+
+- `task`: `"explain_detail"`. `target` is ignored: the whole file is used, as for `explain_file`.
+- `explanation_key`: required, as for a follow-up.
+- `view`: use an id of its own, for example `"<file>#detail-<id>"`, so the request does not supersede the explanation.
+- `use_cache` is ignored. The calls are always made.
+
+Each lines group is cut into pieces of at most 40 lines, and each piece is one model call. Three calls run at a time, and each starts a new Claude session, so none of them adds to the session that answers questions. If one piece fails, the request fails and nothing is stored.
+
+The result is a `result` event with `task: "explain_detail"`, carrying `explanation_key`, `cache_path`, `document` and `sections`, where each section has its `detail`. Every group of the file gets a new detail. Questions and the rest of the explanation are kept. `cost_usd` is the total of the calls, or `null`. If the explanation is not cached, the request fails with `explanation_missing` and no model call is made. An answer without a `lines` list fails with `invalid_response`.
+
+### `explain` with task `explain_detail_section`
+
+Adds a line-by-line explanation to one lines group only: the highlighted section.
+
+- `task`: `"explain_detail_section"`. `target` is required, and it must be exactly the lines of the section as the explanation has them (`source_start` to `source_end`). `content` is the whole file, as for `explain_detail`.
+- `explanation_key`, `view` and `use_cache` are as for `explain_detail`.
+
+Only that group's pieces are explained, so one request is one model call for a section of up to 40 lines. The other sections keep their details. The result is a `result` event with `task: "explain_detail_section"`, with the same fields as `explain_detail`. If the explanation has no section with exactly that target, the request fails with `explanation_missing` and no model call is made.
+
 ### `cancel`
 ```json
 {"type": "cancel", "id": "r-42"}
@@ -155,6 +177,8 @@ or probed.
 ```
 Emitted at most about twice per second while running. `output_chars` counts
 streamed model output characters. It is zero before the first token.
+A detail explanation (`explain_detail`) also sends `"steps": {"done": 2, "total": 9}`,
+the number of its model calls that have finished and the number it makes in all.
 
 ### `result`
 ```json
@@ -207,7 +231,9 @@ streamed model output characters. It is zero before the first token.
   or a section refresh.
 - Each section in `sections` carries `followups`, its questions as
   `{question, answer, created_at}`, and `refreshed_at`, which is `null` unless the
-  section was refreshed.
+  section was refreshed. It also carries `detail`, the line-by-line explanation as
+  `{line, explanation}` items, which is empty until a detail explanation is asked for.
+  The code is not sent: the source pane shows it beside the explanation.
 
 ### `error`
 ```json
@@ -224,7 +250,7 @@ streamed model output characters. It is zero before the first token.
 | `claude_timeout`  | the CLI exceeded `timeout`                               | yes       |
 | `claude_failed`   | the CLI exited non-zero or reported `is_error`           | yes       |
 | `invalid_response`| the CLI output did not match the expected schema         | yes       |
-| `explanation_missing` | a follow-up or section refresh names an explanation that is not cached, or a section the explanation does not have | no |
+| `explanation_missing` | a follow-up, section refresh, deletion or detail explanation names an explanation that is not cached, or a section the explanation does not have | no |
 | `internal`        | unexpected engine bug (details in the engine log)        | no        |
 
 ### `cancelled`
@@ -258,6 +284,15 @@ An explanation is one Org-mode document. It is the cache entry on disk, and the
   `:SECTION_ID:` and `:LINES: A-B`, plus `:REFRESHED:` after a section refresh.
 - A question is a `** Question: ...` heading under its section, with `:KIND: question`
   and `:CREATED:`. Its answer is the body.
+- A detail explanation is a `** Detail explanation` subsection under its section, with
+  `:KIND: detail`, written before the questions. Each line of code is an item,
+  `  - LINE`, with its explanation indented on the next line. The code is not written, so
+  the explanation is read next to the source. Blank lines have no item. A line the model
+  did not explain says so in its explanation. The drawer also has `:FINGERPRINT:`, a short
+  hash of the lines the detail was made from, which a refresh checks before it keeps the
+  detail. An explanation saved by an earlier version may still have `  - LINE · code`
+  items. They are read, but they have no fingerprint, so a full refresh drops that detail
+  and it has to be asked for again.
 - Body text is indented by two spaces, so text from the model cannot start a heading
   or a drawer.
 

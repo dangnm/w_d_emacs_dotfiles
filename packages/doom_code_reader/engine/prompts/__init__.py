@@ -21,6 +21,7 @@ TASK_TEMPLATES: dict[str, str] = {
     "explain_function": "explain_function.md",
     "follow_up": "follow_up.md",
     "explain_section": "explain_section.md",
+    "explain_detail": "explain_detail.md",
 }
 
 TASK_TITLES: dict[str, str] = {
@@ -29,6 +30,7 @@ TASK_TITLES: dict[str, str] = {
     "explain_function": "Explain function",
     "follow_up": "Follow-up question",
     "explain_section": "Refresh section",
+    "explain_detail": "Detail explanation",
 }
 
 

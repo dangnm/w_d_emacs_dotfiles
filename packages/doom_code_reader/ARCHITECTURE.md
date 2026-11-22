@@ -86,7 +86,7 @@ The cache directory is the shared state. Emacs may read it without the engine. O
 | `code-reader-session.el` | `code-reader-view` struct (one per source buffer). Builds requests, dispatches events, applies results, shows saved explanations, handles deletion events. |
 | `code-reader-cache.el` | Reads a saved whole-file explanation from disk without the engine. Computes folder and file names the same way the engine does. |
 | `code-reader-ui.el` | Two-window layout. Explanation mode, derived from `org-mode`. Keymap, including evil motion state. Renders the document, restores folds and cursor anchors, indexes sections. |
-| `code-reader-sync.el` | Scroll and cursor sync rules A to D, with idle-timer debounce and recursion guards (§9). |
+| `code-reader-sync.el` | Scroll and cursor sync rules A to E, with idle-timer debounce and recursion guards (§9). |
 | `code-reader-highlight.el` | Fringe bars and range marks. Pure section-lookup functions, unit-testable without buffers. |
 | `code-reader-chat.el` | Question box in the bottom panel. Sends `follow_up`. |
 | `code-reader-guide.el` | Key table in the bottom panel, and the rules for entering and leaving the explanation pane. |
@@ -214,12 +214,15 @@ The path goes to the kill ring and the clipboard, and the echo area shows it. Cl
 |---|---|---|---|
 | **A** | Source scrolled, point not moved | Section at the middle of the source goes to the top of the explanation | Skipped when a cursor move caused the scroll, because C handles that case |
 | **B** | Explanation scrolled | Source scrolls to the start of the section at the top. Point in the source does not move | Size-only changes are ignored |
-| **C** | Point enters a different section | That section is highlighted and moved to the top of the explanation, even if it is already visible | Debounced 0.1 s idle timer |
-| **D** | RET or click in the explanation | Source point moves to the section, and its range is highlighted | Mouse entry is excluded from the entry rule below |
+| **C** | Point enters a different section | That section is highlighted and moved to the top of the explanation, even if it is already visible. If it has a detail explanation that is folded, the section and the detail are opened first | Debounced 0.1 s idle timer |
+| **D** | RET or click in the explanation | Source point moves to the section, and its range is highlighted. On a detail line, the point goes to that source line alone and only it is marked | Mouse entry is excluded from the entry rule below |
+| **E** | Point moves onto a detail line in the explanation | That detail line is highlighted, and only its source line is marked and shown in the middle of the source | Debounced idle timer, skipped when that line is already highlighted |
 
-Also: entering the explanation from the source with a key puts the cursor on the highlighted section's heading. If that section is out of view, the pane scrolls to it first. The key table is shown after the cursor is placed, so the next command does not hide it.
+A detail line is one `  - N` entry of a section's `** Detail explanation`, with its explanation lines (`code-reader-ui-detail-entries`). When the cursor moves into a section that has a detail, `code-reader-ui-show-detail` opens the section and its detail if the detail is folded, so its lines are on screen. A section with no detail is left as it is. When the source point or the explanation point is on a detail line, that line is highlighted instead of the section, and A, B and C show it in the middle of the pane (`code-reader-sync--centre`), so the lines around it are in view. When a detail explanation arrives, the line under the source point is highlighted again, without moving the pane (`code-reader-sync-refresh-highlight`).
 
-Guards: `code-reader-sync--syncing` (set while code moves a window), `sync-target` (the last section placed), and the recorded start and size of the pane after every programmatic change. Scroll events are debounced with idle timers.
+Also: entering the explanation from the source with a key puts the cursor on the highlighted section's heading, or on the highlighted detail line. If that place is out of view, the pane scrolls to it first. The key table is shown after the cursor is placed, so the next command does not hide it.
+
+Guards: `code-reader-sync--syncing` (set while code moves a window), `sync-target` and `sync-detail-line` (the section and detail line last placed), and the recorded start and size of the pane after every programmatic change. Scroll events are debounced with idle timers.
 
 ## 10. State, concurrency and redraws
 
@@ -245,9 +248,9 @@ Guards: `code-reader-sync--syncing` (set while code moves a window), `sync-targe
 
 ## 12. Testing
 
-- **Python** (123 tests): unit tests for parsing, validation, the Org round trip and the cache; pipeline tests for the orchestrator (fake CLI), cancellation and supersede, the socket server, and a subprocess engine.
+- **Python** (149 tests): unit tests for parsing, validation, the Org round trip and the cache; pipeline tests for the orchestrator (fake CLI), cancellation and supersede, the socket server, and a subprocess engine.
   `python3 -m unittest discover -s tests -t . -p 'test_*.py'`
-- **ERT** (82 tests, batch): sync, highlight and fold logic; the question box; the key table; saved-explanation lookup; deletion and confirmations; and an end-to-end test through the real engine with the fake CLI. The end-to-end test also checks that Emacs finds the file the engine wrote.
+- **ERT** (116 tests, batch; one is skipped unless evil-snipe is on the load path): sync, highlight, detail-line and fold logic; the question box; the key table; saved-explanation lookup; deletion and confirmations; and an end-to-end test through the real engine with the fake CLI. The end-to-end test also checks that Emacs finds the file the engine wrote.
   `emacs -Q --batch -L doom/code-reader -L tests/elisp -l tests/elisp/code-reader-test.el -f ert-run-tests-batch-and-exit`
 - **Real CLI** (manual, not in CI): a 77-line file took 23 s and about 1.8 cents. A follow-up question took about 8 s.
 
