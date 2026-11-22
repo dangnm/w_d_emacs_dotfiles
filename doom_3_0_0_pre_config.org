@@ -1,4 +1,7 @@
 #+TITLE: Doom Emacs dotfiles
+
+*DEPRECATED:* this is the Doom Emacs 3.0.0-pre config and is no longer maintained. Use [[file:config.org][config.org]] instead, which targets Doom Emacs v2.2.4 (commit ~6bdd928~). If ~~/.config/doom/config.org~ is still a symlink to this file, re-link it to ~config.org~.
+
 * Table of contents                                               :TOC:QUOTE:
 #+BEGIN_QUOTE
 - [[#installation][Installation]]
