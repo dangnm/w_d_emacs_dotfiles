@@ -41,6 +41,7 @@
   - [[#workspace-persp-mode-config][Workspace (PERSP MODE) config]]
   - [[#shell-config][Shell config]]
   - [[#code-reader-config][Code reader config]]
+  - [[#go-config][Go config]]
 - [[#tips][Tips]]
   - [[#emacs][Emacs]]
   - [[#check-all-bindings][Check all bindings]]
@@ -869,6 +870,13 @@ Otherwise move to the end of the buffer."
 (when (modulep! :lang javascript)
   (add-to-list 'auto-mode-alist '("\\.ts\\'" . typescript-mode)))
 #+END_SRC
+** Go config
+Go files open in ~go-mode~ with syntax highlighting from Doom's ~:lang go~ module. Modules are declared in ~$DOOMDIR/init.el~, not in this file: in the ~:lang~ block, replace ~;;(go +lsp)~ with ~go~, then run ~~/.config/emacs/bin/doom sync~.
+
+Go buffers use Doom's local leader (~SPC m~):
+- ~SPC m b r~ run (~go run .~), ~SPC m b b~ build, ~SPC m b c~ clean
+- ~SPC m t a~ test all, ~SPC m t s~ test single, ~SPC m t f~ test file
+- ~SPC m a~ / ~SPC m d~ add / remove struct tags, ~SPC m i~ go to imports
 ** Agent shell config
 Packages must be declared in ~~/.config/doom/packages.el~. Add these 3 lines then run ~~/.config/emacs/bin/doom sync~ from terminal:
 #+BEGIN_SRC emacs-lisp :tangle no

@@ -91,7 +91,7 @@ are the start of that key. The engine checks the full key before it uses a file.
 Press `p` in the explanation pane to show the file's path and copy it to the clipboard.
 Opening a file reads its saved explanation directly, so the engine does not start for
 it. The engine starts only when Claude is needed: for a new explanation (`g`), a
-question, or a section refresh. `code-reader-clear-cache` removes every explanation, in every project, after asking
+question, a section refresh, or a detail explanation (`D`). `code-reader-clear-cache` removes every explanation, in every project, after asking
 yes or no.
 
 ## Usage
@@ -111,27 +111,53 @@ instead.
 
 **Reading the explanation.** The right pane is an Org buffer. Each section is a
 heading, and the sections start folded. `TAB` folds and unfolds the section at
-point, and `S-TAB` folds or unfolds all of them.
+point, or one line's detail item when point is on that item (from anywhere on its
+line), and `S-TAB` folds or unfolds all of them. A detail item's fold is not kept when
+the explanation is redrawn, for example after a question is answered.
 
 **Asking about a section.** Under the explanation pane is a question box. Its
 header shows the lines it is about: the section highlighted in the explanation,
 which is the section that holds the source point. Type a question and press
 `RET`. The answer is added to the explanation as a heading nested under that
 section, `** Question: ...`, and the section opens to show it. The answer stays
-folded until you press `TAB` on the question. The question is kept in the cache
+folded until you press `TAB` on the question.
+
+**Asking about a line.** When the highlighted line has a detail entry (the source
+point is on it, or you pointed at it in the explanation), `a` asks about that line
+instead. The header then says `About line 19 of lines 1–60`. The answer appears under
+that line's entry, in a drawer. `TAB` on the question, or anywhere in its answer, folds
+the answer away, and `TAB` again opens it. The answer is not a heading, because folding a
+heading would hide the lines after it. `d` on the question or its answer deletes it. A full refresh (`g`) keeps the question while its line is
+unchanged, and a section refresh (`r`) removes it. The question is kept in the cache
 file, so reopening the file shows it again. `a` in the explanation pane moves to
 the box. From the box, press `ESC` and then `C-w k` to
 go back. A question sends the file text and the section's lines, and Claude can
 read other files in the project to answer.
 
+**Line-by-line detail.** `D` in the explanation pane explains the whole file in detail.
+It asks yes or no first, because it takes several minutes. It adds a `** Detail explanation`
+subsection to every section: each line of code in the section, top to bottom, with the
+line number and what that line does underneath. The code itself is not repeated, because
+the source pane shows it, and each explanation maps to its line there. The subsection
+starts folded; `TAB` opens it, and after `D` the details are open. A section is cut into
+pieces of about forty lines, and the pieces are explained a few at a time, so a long file
+takes a few minutes. The top of the explanation pane shows the status:
+`Detail explanation running: 2 of 9 pieces done · 41s`, or `failed` with the reason until
+you try again. `c` cancels. The details are kept in the cache file with the rest.
+Pressing `D` again replaces them. A full refresh (`g`) keeps a section's detail while
+none of its lines changed, and drops it when one did.
+
+`s` explains only the highlighted section in detail. It starts without a question,
+because it is one section's worth of calls, and it replaces only that section's detail.
+
 `M-x code-reader-explain-file` runs the same whole-file explanation without
 opening the layout.
 
-In the explanation pane: `RET` or click jumps to the source, `TAB` folds or
+In the explanation pane: `RET` or click jumps to the source (on a folded detail item, `RET` opens it instead), `TAB` folds or
 unfolds a section, `g` refreshes (bypasses the cache; it asks yes or no first, because it replaces the saved file), `r` refreshes only the
 highlighted section (the lines the question box is about) and leaves the rest of
 the explanation as it is, `c` cancels, `p` shows the explanation's cache file and copies its path, `d` deletes the question
-at point after asking yes or no (it is removed from the saved file too), `t` toggles
+at point after asking yes or no (it is removed from the saved file too), `D` explains the whole file in detail after a yes or no (see below), `s` explains the highlighted section in detail, `C` collapses every section (only the headings show), `t` toggles
 the pane, `q` closes it. A
 section refresh is kept with its section, so it survives later explanations until a
 full refresh (`g`) replaces the whole explanation. It also resets the section: its
@@ -159,6 +185,14 @@ Closing the reader restores the original window layout.
   This never calls Claude.
 - Scrolling the explanation pane brings the matching source region into view and
   marks it with a bar in the left fringe.
+- With a detail explanation open, a line with its own detail entry is selected on
+  its own. Point on that source line highlights its entry in the explanation, and
+  point on the entry marks only its source line in the source pane. The selected
+  line is shown in the middle of its pane, so the lines around it are in view. `RET` on an
+  entry jumps to that line alone. When the cursor moves into a section that has a
+  detail explanation and the detail is folded, the detail opens, so the line is
+  selected in it. A section without a detail stays as it is. Scrolling the source
+  without moving point does not open anything.
 - Explanations stay until you press `g`. Editing the source does not expire them,
   and the header does not change. Line numbers in an explanation refer to the text
   when it was made, so press `g` after large edits.

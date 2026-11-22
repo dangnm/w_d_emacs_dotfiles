@@ -7,6 +7,7 @@ and reported in ``warnings`` so the frontend can show what happened.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from typing import Any
 
 from engine.config import MAX_SECTIONS_TEXT_CHARS
 from engine.models.request import Target
+from engine.org import code_text
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 _LIST_ITEM_LIMIT = 30
@@ -84,6 +86,60 @@ def normalize_section_explanation(structured: dict[str, Any]) -> str:
     if not isinstance(explanation, str) or not explanation.strip():
         raise InvalidResponse("the model returned no explanation")
     return explanation.strip()[:MAX_SECTION_CHARS]
+
+
+MAX_DETAIL_CHARS = 1200
+# Shown for a line of code that the model did not explain, so the gap is visible.
+NO_DETAIL_TEXT = "No explanation was returned for this line."
+
+
+def detail_line_numbers(lines: list[str], start: int, end: int) -> list[int]:
+    """Return the lines of ``start..end`` that get a detail entry: the ones that hold code.
+
+    Blank lines get no entry, and neither do lines past the end of the snapshot.
+    """
+    last = min(end, len(lines))
+    return [number for number in range(start, last + 1) if code_text(lines[number - 1]).strip()]
+
+
+def detail_fingerprint(lines: list[str], start: int, end: int) -> str:
+    """Return a short fingerprint of the lines of ``start..end`` that a detail explanation covers.
+
+    It covers the number and the code of each of those lines, so it changes when a line is
+    edited, when lines are added or removed above it, or when a line gains or loses its code.
+    A saved detail is kept on a refresh only while its fingerprint still matches the file.
+    """
+    digest = hashlib.sha256()
+    for number in detail_line_numbers(lines, start, end):
+        digest.update(f"{number}\t{code_text(lines[number - 1])}\n".encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
+def normalize_detail(structured: dict[str, Any], *, start: int, end: int,
+                     lines: list[str]) -> list[dict[str, Any]]:
+    """Return one entry per line of code in ``start..end``, in file order.
+
+    Each entry is ``{"line", "explanation"}``. The code is not kept, because the
+    source pane shows it beside the explanation. Blank lines get no entry. A line of
+    code the model left out gets :data:`NO_DETAIL_TEXT`. Entries for lines outside
+    the range are ignored. Raises :class:`InvalidResponse` when there is no ``lines`` list.
+    """
+    raw = structured.get("lines")
+    if not isinstance(raw, list):
+        raise InvalidResponse("the model returned no 'lines' list")
+    texts: dict[int, str] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        number = entry.get("line")
+        text = entry.get("explanation")
+        if not _is_int(number) or not start <= number <= end:
+            continue
+        if not isinstance(text, str) or not text.strip():
+            continue
+        texts.setdefault(number, " ".join(text.split())[:MAX_DETAIL_CHARS])
+    return [{"line": number, "explanation": texts.get(number, NO_DETAIL_TEXT)}
+            for number in detail_line_numbers(lines, start, end)]
 
 
 def _string_list(raw: Any, warnings: list[dict[str, Any]], name: str) -> list[str]:

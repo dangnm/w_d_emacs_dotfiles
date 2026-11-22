@@ -56,14 +56,19 @@ def error(request_id: str | None, code: str, message: str, *, retryable: bool = 
     }
 
 
-def progress(request_id: str, phase: str, elapsed_ms: int, output_chars: int) -> dict[str, Any]:
-    return {
+def progress(request_id: str, phase: str, elapsed_ms: int, output_chars: int,
+             steps: dict[str, int] | None = None) -> dict[str, Any]:
+    message: dict[str, Any] = {
         "type": "progress",
         "id": request_id,
         "phase": phase,
         "elapsed_ms": elapsed_ms,
         "output_chars": output_chars,
     }
+    # A request made of several model calls (a detail explanation) reports how many are done.
+    if steps is not None:
+        message["steps"] = steps
+    return message
 
 
 def cancelled(request_id: str, reason: str) -> dict[str, Any]:

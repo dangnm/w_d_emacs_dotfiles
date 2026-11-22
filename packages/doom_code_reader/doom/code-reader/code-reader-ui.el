@@ -39,6 +39,9 @@
 (declare-function code-reader-copy-cache-path "code-reader-commands" ())
 (declare-function code-reader-delete-question "code-reader-commands" ())
 (declare-function code-reader-refresh-section "code-reader-commands" ())
+(declare-function code-reader-explain-detail "code-reader-commands" ())
+(declare-function code-reader-explain-section-detail "code-reader-commands" ())
+(declare-function code-reader-collapse-all "code-reader-commands" ())
 
 ;;; Window lookup
 
@@ -53,13 +56,62 @@
 
 ;;; Explanation mode
 
+(defun code-reader-ui--answer-drawer-pos ()
+  "Return the position of the :ANSWER: line of the question about a line that point is on, or nil.
+Point is on such a question when it is on the question's line, on its :ANSWER: line, or in its answer."
+  (save-excursion
+    (beginning-of-line)
+    (cond
+     ((looking-at "^[ \t]+Question about line [0-9]+ (asked ")
+      (forward-line 1)
+      (and (looking-at "^[ \t]+:ANSWER:[ \t]*$") (point)))
+     ((looking-at "^[ \t]+:ANSWER:[ \t]*$") (point))
+     (t
+      (catch 'found
+        (while (= (forward-line -1) 0)
+          (cond
+           ((looking-at "^[ \t]+:ANSWER:[ \t]*$") (throw 'found (point)))
+           ((or (looking-at "^  - [0-9]") (looking-at "^\\*")
+                (looking-at "^[ \t]+:END:[ \t]*$") (looking-at "^[ \t]+Question about line"))
+            (throw 'found nil))))
+        nil)))))
+
+(defun code-reader-explanation-tab ()
+  "TAB in the explanation pane: fold or unfold what point is on.
+A detail item is folded from the start of its line, because Org folds a list item only from
+there, and point stays where it was.  A question about a line is folded by its answer drawer,
+from anywhere in the question.  Anywhere else TAB is Org's own TAB."
+  (interactive)
+  (let ((answer (code-reader-ui--answer-drawer-pos)))
+    (cond
+     ((org-at-item-p)
+      (save-excursion
+        (beginning-of-line)
+        (org-cycle)))
+     (answer
+      (save-excursion
+        (goto-char answer)
+        (org-cycle)))
+     (t (org-cycle)))))
+
+(defun code-reader-ui--item-folded-p ()
+  "Return non-nil when point is on a detail item whose explanation is folded away."
+  (save-excursion
+    (beginning-of-line)
+    (and (org-at-item-p)
+         (= (forward-line 1) 0)
+         (not (eobp))
+         (invisible-p (point)))))
+
 (defvar code-reader-explanation-mode-map
   (let ((map (make-sparse-keymap)))
     ;; Everything else (folding with TAB, Org's own motion) is Org's.
     (set-keymap-parent map org-mode-map)
     (define-key map (kbd "RET") #'code-reader-sync-jump-at-point)
     (define-key map [mouse-1] #'code-reader-sync-mouse-jump)
-    (define-key map (kbd "TAB") #'org-cycle)
+    (define-key map (kbd "TAB") #'code-reader-explanation-tab)
+    ;; The Tab key can arrive as the tab event rather than as TAB, so both are bound.
+    (define-key map [tab] #'code-reader-explanation-tab)
     (define-key map (kbd "<backtab>") #'org-shifttab)
     (define-key map "g" #'code-reader-refresh)
     (define-key map "c" #'code-reader-cancel)
@@ -69,6 +121,9 @@
     (define-key map "r" #'code-reader-refresh-section)
     (define-key map "p" #'code-reader-copy-cache-path)
     (define-key map "d" #'code-reader-delete-question)
+    (define-key map "D" #'code-reader-explain-detail)
+    (define-key map "s" #'code-reader-explain-section-detail)
+    (define-key map "C" #'code-reader-collapse-all)
     map)
   "Keymap for `code-reader-explanation-mode'.")
 
@@ -76,8 +131,11 @@
   "Major mode for the Code Reader explanation pane: an Org document.
 Each section is a heading.  TAB folds and unfolds it, and the questions asked
 about it are nested under it.  RET or mouse-1 on a section jumps to its source
-lines.  g refreshes the explanation, r refreshes the highlighted section, a asks
-about it, c cancels a running request, t toggles the panel and q closes the view.
+lines.  g refreshes the explanation, r refreshes the highlighted section, D explains
+the whole file in detail (after a yes or no), s explains the highlighted section in
+detail, C collapses every section, a asks about the highlighted line or section,
+c cancels a running request,
+t toggles the panel and q closes the view.
 Evil users get the same keys in motion state."
   (setq-local truncate-lines nil)
   (setq buffer-read-only t)
@@ -96,7 +154,8 @@ Evil users get the same keys in motion state."
   (when (fboundp 'evil-define-key*)
     (evil-define-key* 'motion code-reader-explanation-mode-map
       (kbd "RET") #'code-reader-sync-jump-at-point
-      (kbd "TAB") #'org-cycle
+      (kbd "TAB") #'code-reader-explanation-tab
+      [tab] #'code-reader-explanation-tab
       (kbd "<backtab>") #'org-shifttab
       "g" #'code-reader-refresh
       "c" #'code-reader-cancel
@@ -105,7 +164,18 @@ Evil users get the same keys in motion state."
       "r" #'code-reader-refresh-section
       "p" #'code-reader-copy-cache-path
       "d" #'code-reader-delete-question
+      "D" #'code-reader-explain-detail
+      "s" #'code-reader-explain-section-detail
+      "C" #'code-reader-collapse-all
       "q" #'code-reader-close)))
+
+;; evil-snipe binds s and S in normal and motion state, in every buffer, and its keymap
+;; comes before the pane's own keys, so s would start a snipe instead of the section detail.
+;; evil-snipe skips the modes in `evil-snipe-disabled-modes' whenever it turns on in a buffer.
+;; The mode hook is too early for this, because evil-snipe turns on after it.
+(defvar evil-snipe-disabled-modes)
+(with-eval-after-load 'evil-snipe
+  (add-to-list 'evil-snipe-disabled-modes 'code-reader-explanation-mode))
 
 (defun code-reader-ui-explanation-buffer (view)
   "Return VIEW's explanation buffer, creating it when needed."
@@ -202,6 +272,30 @@ The marks belong to the explanation pane, so they go when the pane goes."
                     (or (plist-get (code-reader-view-error view) :code) "unknown")))
     (_ "idle")))
 
+(defun code-reader-ui--one-line (text)
+  "Return TEXT as one short line for a header line: no line breaks, and no `%' codes."
+  (let ((line (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim (format "%s" (or text ""))))))
+    (replace-regexp-in-string "%" "%%" (truncate-string-to-width line 80 nil nil "..."))))
+
+(defun code-reader-ui--detail-text (view)
+  "Return the status of VIEW's detail explanation for the header, or nil when there is none.
+A running one says how many pieces are done and for how long, so the reader can see that
+it is still working.  A failed one keeps its reason until the next one starts."
+  (let ((detail (code-reader-view-detail view)))
+    (pcase (plist-get detail :status)
+      ('running
+       (let ((done (plist-get detail :done))
+             (total (plist-get detail :total))
+             (seconds (floor (- (float-time) (or (plist-get detail :started) (float-time))))))
+         (propertize (if total
+                         (format "Detail explanation running: %d of %d pieces done · %ds"
+                                 (or done 0) total seconds)
+                       (format "Detail explanation running: starting · %ds" seconds))
+                     'face 'bold)))
+      ('failed
+       (propertize (format "Detail explanation failed: %s" (code-reader-ui--one-line (plist-get detail :message)))
+                   'face 'error)))))
+
 (defun code-reader-ui-header-string (view)
   "Return the one-line header for VIEW's explanation buffer."
   (let* ((root (code-reader-view-project-root view))
@@ -213,6 +307,10 @@ The marks belong to the explanation pane, so they go when the pane goes."
                       (code-reader-ui--status-text view)
                       (format "Claude: %s" (or (code-reader-view-claude-session view) "-"))
                       (format "engine: %s" (code-reader-transport-state)))))
+    ;; The detail status goes first, so a narrow window cuts off the other parts, not it.
+    (let ((detail (code-reader-ui--detail-text view)))
+      (when detail
+        (setq parts (cons detail parts))))
     (when (code-reader-view-note view)
       (setq parts (append parts (list (code-reader-view-note view)))))
     (concat " " (mapconcat (lambda (part) (if (stringp part) part (format "%s" part)))
@@ -299,6 +397,110 @@ questions nested under it belong to it."
              (plist-put section :exp-end (copy-marker end))))))
      "LEVEL=1")))
 
+;;; Detail entries
+;;
+;; A detail entry is one line of the detail explanation: `  - N', the source line
+;; number, and its explanation lines underneath.  Each is found in the text of its section, so
+;; the sync can select a single source line in the explanation.
+
+(defconst code-reader-ui--detail-item-regexp "^  - \\([0-9]+\\)\\(?: ·.*\\)?$"
+  "Matches the first line of a detail entry: its source line number.
+An older explanation also has the code after the number, which is ignored.")
+
+(defun code-reader-ui--in-detail-p (position)
+  "Return non-nil when POSITION is under a detail explanation heading."
+  (save-excursion
+    (goto-char position)
+    (and (ignore-errors (org-back-to-heading t) t)
+         (equal (org-entry-get nil "KIND") "detail"))))
+
+(defun code-reader-ui--entry-end (item limit)
+  "Return where the detail entry that starts at ITEM ends, without its trailing blank lines.
+The entry ends before the next item, the next heading, or LIMIT.  Match data is not kept."
+  (save-excursion
+    (goto-char item)
+    (forward-line 1)
+    (goto-char (if (re-search-forward "^\\(  - [0-9]+\\(?: ·.*\\)?$\\|  Question about line\\|\\*\\)" limit t)
+                   (match-beginning 0)
+                 limit))
+    (skip-chars-backward " \t\n" item)
+    (line-beginning-position 2)))
+
+(defun code-reader-ui-detail-entries (view section)
+  "Return SECTION's detail entries that are on screen in VIEW's explanation buffer.
+Each entry is a plist (:line N :start POS :end POS), where N is the source line
+and POS are buffer positions, from the entry's item line to the end of its
+explanation.  Entries under a folded detail explanation are not on screen, so they
+are left out."
+  (let ((start (plist-get section :exp-start))
+        (end (plist-get section :exp-end))
+        (entries nil))
+    (when (and (markerp start) (marker-position start)
+               (markerp end) (marker-position end))
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (save-excursion
+          (save-match-data
+            (let ((limit (marker-position end)))
+              (goto-char (marker-position start))
+              (while (re-search-forward code-reader-ui--detail-item-regexp limit t)
+                ;; The match data is read before any helper runs, because they search too.
+                (let ((item (match-beginning 0))
+                      (line (string-to-number (match-string 1))))
+                  (when (and (not (invisible-p item))
+                             (code-reader-ui--in-detail-p item))
+                    (push (list :line line
+                                :start item
+                                :end (code-reader-ui--entry-end item limit))
+                          entries)))))))))
+    (nreverse entries)))
+
+(defun code-reader-ui-detail-entry-for-line (view section line)
+  "Return the on-screen detail entry of SECTION for source LINE, or nil."
+  (and line
+       (cl-find line (code-reader-ui-detail-entries view section)
+                :key (lambda (entry) (plist-get entry :line)))))
+
+(defun code-reader-ui-detail-entry-at (view section position)
+  "Return the on-screen detail entry of SECTION that holds buffer POSITION, or nil."
+  (cl-find-if (lambda (entry)
+                (and (<= (plist-get entry :start) position)
+                     (< position (plist-get entry :end))))
+              (code-reader-ui-detail-entries view section)))
+
+(defun code-reader-ui-detail-heading (view section)
+  "Return where SECTION's detail explanation heading starts in VIEW's explanation buffer, or nil."
+  (let ((start (plist-get section :exp-start)))
+    (when (and (markerp start) (marker-position start))
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (save-excursion
+          (goto-char (marker-position start))
+          (let ((found nil))
+            (org-map-entries
+             (lambda ()
+               (when (and (not found) (equal (org-entry-get nil "KIND") "detail"))
+                 (setq found (point))))
+             "LEVEL=2" 'tree)
+            found))))))
+
+(defun code-reader-ui-show-detail (view section)
+  "Open SECTION's detail explanation in VIEW's explanation pane, if it has one and it is folded.
+The section is opened down to its headings, so the detail's heading is on screen, and the
+detail's entries are shown.  Answers to questions stay folded.  Return non-nil when SECTION
+has a detail explanation."
+  (let ((detail (code-reader-ui-detail-heading view section))
+        (start (plist-get section :exp-start)))
+    (when detail
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (unless (save-excursion (goto-char detail) (code-reader-ui--body-shown-p))
+          (save-excursion
+            (goto-char (marker-position start))
+            (org-fold-show-entry)
+            (org-fold-show-children))
+          (save-excursion
+            (goto-char detail)
+            (org-fold-show-entry))))
+      t)))
+
 (defun code-reader-ui--heading-key ()
   "Return the key of the top-level heading at point: its section id, or its kind."
   (or (org-entry-get nil "SECTION_ID") (org-entry-get nil "KIND")))
@@ -309,8 +511,18 @@ questions nested under it belong to it."
     (org-end-of-meta-data t)
     (not (invisible-p (point)))))
 
+(defun code-reader-ui--detail-key (parent-key)
+  "Return the key that records whether the detail explanation under PARENT-KEY is open."
+  (format "detail:%s" parent-key))
+
+(defun code-reader-ui--parent-key ()
+  "Return the heading key of the section that the heading at point belongs to."
+  (save-excursion
+    (org-up-heading-safe)
+    (code-reader-ui--heading-key)))
+
 (defun code-reader-ui--expanded-keys ()
-  "Return the keys of the top-level headings whose text is shown.
+  "Return the keys of the top-level headings whose text is shown, and of the open detail explanations.
 A buffer with no headings yet gets the default: the summary open, the rest folded."
   (let ((keys nil)
         (headings 0))
@@ -320,13 +532,19 @@ A buffer with no headings yet gets the default: the summary open, the rest folde
          (cl-incf headings)
          (when (code-reader-ui--body-shown-p)
            (push (code-reader-ui--heading-key) keys)))
-       "LEVEL=1"))
+       "LEVEL=1")
+      (org-map-entries
+       (lambda ()
+         (when (and (equal (org-entry-get nil "KIND") "detail") (code-reader-ui--body-shown-p))
+           (push (code-reader-ui--detail-key (code-reader-ui--parent-key)) keys)))
+       "LEVEL=2"))
     (if (zerop headings) '("summary") keys)))
 
-(defun code-reader-ui--restore-folds (expanded reveal-id)
+(defun code-reader-ui--restore-folds (expanded reveal-id &optional show-details)
   "Fold every top-level heading, then open those named in EXPANDED.
 An opened heading shows its text and its questions, and the answers stay folded.
-REVEAL-ID, when non-nil, is opened the same way, so its newest question is in view."
+REVEAL-ID, when non-nil, is opened the same way, so its newest question is in view.
+A detail explanation is opened when it was open before, or always when SHOW-DETAILS."
   (save-excursion
     (org-overview)
     (org-map-entries
@@ -336,7 +554,14 @@ REVEAL-ID, when non-nil, is opened the same way, so its newest question is in vi
            ;; The entry's text first: a heading without questions shows nothing else.
            (org-fold-show-entry)
            (org-fold-show-children))))
-     "LEVEL=1")))
+     "LEVEL=1")
+    (org-map-entries
+     (lambda ()
+       (when (and (equal (org-entry-get nil "KIND") "detail")
+                  (or show-details
+                      (member (code-reader-ui--detail-key (code-reader-ui--parent-key)) expanded)))
+         (org-fold-show-entry)))
+     "LEVEL=2")))
 
 (defun code-reader-ui--heading-of (id)
   "Return the position where section ID starts in the explanation buffer, or nil.
@@ -353,15 +578,24 @@ The ids are compared with `equal': each render makes new strings, and
       found)))
 
 (defun code-reader-ui--reapply-active-marks (view)
-  "Mark VIEW's active section again, after its explanation buffer was redrawn."
+  "Mark VIEW's active detail line, or else its active section, after a redraw.
+A detail line that is folded now is not on screen, so the section is marked instead
+and the detail line is forgotten."
   (let* ((id (code-reader-view-active-section-id view))
          (section (and id (code-reader-session-section-by-id view id)))
+         (entry (and section
+                     (code-reader-ui-detail-entry-for-line
+                      view section (code-reader-view-active-detail-line view))))
          (start (plist-get section :exp-start))
-         (end (plist-get section :exp-end)))
-    (when (and (markerp start) (marker-position start)
-               (markerp end) (marker-position end))
-      (code-reader-highlight-set-active (code-reader-view-explanation-buffer view)
-                                        (marker-position start) (marker-position end)))))
+         (end (plist-get section :exp-end))
+         (buffer (code-reader-view-explanation-buffer view)))
+    (cond
+     (entry
+      (code-reader-highlight-set-active buffer (plist-get entry :start) (plist-get entry :end)))
+     ((and (markerp start) (marker-position start)
+           (markerp end) (marker-position end))
+      (setf (code-reader-view-active-detail-line view) nil)
+      (code-reader-highlight-set-active buffer (marker-position start) (marker-position end))))))
 
 (defun code-reader-ui--anchor (position)
   "Return an anchor for POSITION in the explanation buffer, one that a redraw keeps.
@@ -425,13 +659,27 @@ When that line is hidden by a fold, the section's heading is used instead."
                           (line-end-position)))))
     (if (invisible-p position) origin position)))
 
-(defun code-reader-ui-render (view &optional keep-top reveal-id)
+(defun code-reader-ui-collapse-all (view)
+  "Fold every section of VIEW's explanation, so that only the section headings show.
+Each section's text, questions and detail explanation fold with it.  When the point was
+in text that is now folded, it moves to the heading of its section."
+  (with-current-buffer (code-reader-view-explanation-buffer view)
+    (org-overview)
+    (when (invisible-p (point))
+      (let* ((id (get-text-property (point) 'code-reader-section-id))
+             (section (and id (code-reader-session-section-by-id view id)))
+             (heading (plist-get section :exp-start)))
+        (when (and (markerp heading) (marker-position heading))
+          (goto-char (marker-position heading)))))))
+
+(defun code-reader-ui-render (view &optional keep-top reveal-id show-details)
   "Redraw VIEW's explanation buffer from its state, and refresh its header.
 With KEEP-TOP, each window keeps its place: the line at its top and the cursor
 stay on the same lines, so a redraw after a new answer does not scroll the
 explanation back to the start or move the cursor.  Sections keep their open or
-folded state.  REVEAL-ID, a section id, is opened so that its questions, including
-a new one, are in view."
+folded state, and so do their detail explanations.  REVEAL-ID, a section id, is
+opened so that its questions, including a new one, are in view.  SHOW-DETAILS
+opens every detail explanation."
   (let ((buffer (code-reader-ui-explanation-buffer view)))
     (with-current-buffer buffer
       (let* ((inhibit-read-only t)
@@ -454,7 +702,7 @@ a new one, are in view."
         (setq header-line-format (code-reader-ui-header-string view))
         (when organised
           (code-reader-ui--index-sections view)
-          (code-reader-ui--restore-folds expanded reveal-id))
+          (code-reader-ui--restore-folds expanded reveal-id show-details))
         (dolist (place places)
           (let* ((window (nth 0 place))
                  (start (if (nth 1 place) (code-reader-ui--anchor-position (nth 1 place)) (point-min)))

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ENGINE_VERSION = "0.1.0"
+ENGINE_VERSION = "0.4.0"
 PROTOCOL_VERSION = 1
 
 # Limits. Keep prompts small: the spec forbids loading the whole codebase.
@@ -20,6 +20,9 @@ MIN_TIMEOUT_S = 5.0
 MAX_TIMEOUT_S = 900.0
 MAX_SECTIONS_TEXT_CHARS = 4000
 PROGRESS_INTERVAL_S = 0.5
+# A detail explanation is asked for this many lines at a time, and this many calls run at once.
+DETAIL_CHUNK_LINES = 40
+DETAIL_CONCURRENCY = 3
 # asyncio stream limit for claude stdout lines (stream-json lines can be large).
 STREAM_LINE_LIMIT = 32 * 1024 * 1024
 

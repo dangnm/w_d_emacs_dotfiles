@@ -43,6 +43,8 @@ skipped in the source buffer, which is where point moves."
                         (code-reader-view-explanation-buffer view)))
     (with-current-buffer buffer
       (add-hook 'post-command-hook #'code-reader-sync--post-command nil t)
+      ;; Each function checks which pane it runs in, so both panes get both.
+      (add-hook 'post-command-hook #'code-reader-sync--explanation-post-command nil t)
       (add-hook 'post-command-hook #'code-reader-guide--post-command nil t)))
   ;; The bottom panel shows the key table or the question box.  Selecting the panel
   ;; runs its hook in whichever of the two buffers the panel showed, so both need it.
@@ -213,6 +215,40 @@ the file still has are kept."
   (interactive)
   (code-reader-session-refresh-section (code-reader-commands--existing-view)))
 
+(defun code-reader-collapse-all ()
+  "Collapse every section of the explanation in this pane, so that only the headings show.
+Nothing is saved, and the source is not changed.  Moving the cursor in the source into a
+section that has a detail explanation opens that detail again."
+  (interactive)
+  (code-reader-ui-collapse-all (code-reader-commands--existing-view)))
+
+(defun code-reader-explain-detail ()
+  "Explain the whole file in detail, after asking yes or no.
+Every lines group gets a \"Detail explanation\" subsection, with one entry per line
+of code, read from the top down.  Claude is asked for a few dozen lines at a time,
+and several calls run together, so this takes several minutes.  The details already
+shown are replaced; the questions and the rest of the explanation are kept.  `c'
+cancels it."
+  (interactive)
+  (let ((view (code-reader-commands--existing-view)))
+    ;; The checks come first, so that a question is never asked about something that cannot run.
+    (code-reader-session-check-detail-start view)
+    (if (y-or-n-p (concat "Explain every line of the file in detail? Claude is asked in pieces "
+                          "of a few dozen lines, so this takes several minutes. "
+                          "The details already shown are replaced. "))
+        (code-reader-session-explain-detail view)
+      (message "Code Reader: detail explanation not started"))))
+
+(defun code-reader-explain-section-detail ()
+  "Explain the highlighted section in detail, line by line.
+Only that section's lines are asked about, and the rest of the explanation is kept.
+It starts without a question, because it is only one section's worth of calls.  `c'
+cancels it."
+  (interactive)
+  (let* ((view (code-reader-commands--existing-view))
+         (section (code-reader-session-highlighted-section view)))
+    (code-reader-session-explain-detail view section)))
+
 (defun code-reader-copy-cache-path ()
   "Show the cache file of the explanation on screen, and copy its path.
 The path goes to the kill ring and to the system clipboard, so it can be pasted
@@ -234,8 +270,8 @@ elsewhere.  The file is the explanation as an Org document."
            (insert text)
            (call-process-region (point-min) (point-max) "pbcopy")))))
 
-(defun code-reader-commands--question-at-point ()
-  "Return a plist (:created :text :section) for the question at point, or nil.
+(defun code-reader-commands--heading-question-at-point ()
+  "Return a plist (:created :text :section) for the \"** Question:\" heading at point, or nil.
 Point is on a question when the nearest heading is a \"** Question:\" heading of the
 explanation.  CREATED is its CREATED time, which identifies it to the engine."
   (save-excursion
@@ -251,6 +287,40 @@ explanation.  CREATED is its CREATED time, which identifies it to the engine."
                       :text (string-trim (replace-regexp-in-string "\\`Question: *" "" heading))
                       :section (org-entry-get nil "SECTION_ID"))))))
       (error nil))))
+
+(defconst code-reader-commands--line-question-regexp
+  "^[ \t][ \t]+Question about line [0-9]+ (asked \\([^,]+\\), \\([0-9a-f]*\\)): \\(.*\\)$"
+  "Matches the first line of a question about a line, written under that line's detail entry.")
+
+(defun code-reader-commands--line-question-at-point ()
+  "Return a plist (:created :text :section) for the question about a line at point, or nil.
+Point is in such a question when it is on its first line or on its answer.  The walk up
+stops at the entry's item or at a heading, so a question of another line is not taken."
+  (save-excursion
+    (beginning-of-line)
+    (catch 'found
+      (while t
+        (cond
+         ((looking-at code-reader-commands--line-question-regexp)
+          (let ((created (match-string-no-properties 1))
+                (text (string-trim (match-string-no-properties 3))))
+            (throw 'found
+                   (list :created created
+                         :text text
+                         :section (save-excursion
+                                    (org-back-to-heading t)
+                                    (while (and (> (org-current-level) 1) (org-up-heading-safe)))
+                                    (org-entry-get nil "SECTION_ID"))))))
+         ((or (looking-at "^  - [0-9]") (looking-at "^\\*"))
+          (throw 'found nil)))
+        (when (bobp) (throw 'found nil))
+        (forward-line -1)))))
+
+(defun code-reader-commands--question-at-point ()
+  "Return a plist (:created :text :section) for the question at point, or nil.
+That is a \"** Question:\" heading, or a question about a line of the detail explanation."
+  (or (code-reader-commands--heading-question-at-point)
+      (code-reader-commands--line-question-at-point)))
 
 (defun code-reader-delete-question ()
   "Delete the question at point from the explanation and its saved file, after asking.

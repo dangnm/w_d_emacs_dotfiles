@@ -18,6 +18,25 @@ FOLLOW_UP_SCHEMA: dict = {
     "required": ["answer"],
 }
 
+# Line-by-line explanation of a piece of a lines group (task "explain_detail").
+DETAIL_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "lines": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "line": {"type": "integer"},
+                    "explanation": {"type": "string"},
+                },
+                "required": ["line", "explanation"],
+            },
+        },
+    },
+    "required": ["lines"],
+}
+
 EXPLANATION_SCHEMA: dict = {
     "type": "object",
     "properties": {

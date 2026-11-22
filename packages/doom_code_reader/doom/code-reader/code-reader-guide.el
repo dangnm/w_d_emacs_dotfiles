@@ -29,12 +29,13 @@
   "Column titles of the key guide.")
 
 (defconst code-reader-guide-rows
-  '((("RET" . "jump to source") . ("g" . "refresh"))
-    (("click" . "jump to source") . ("r" . "refresh this section"))
-    (("a" . "ask about this section") . ("c" . "cancel"))
-    (("C-w h" . "back to source") . ("t / q" . "hide pane, close"))
-    (("C-w j" . "to the question box") . ("p" . "copy cache path"))
-    (("d" . "delete the question at point") . nil))
+  '((("RET" . "jump to the source") . ("g" . "refresh the explanation"))
+    (("click" . "jump to the source") . ("r" . "refresh this section"))
+    (("a" . "ask about the highlighted line or section") . ("c" . "cancel the running request"))
+    (("C-w h" . "go back to the source") . ("t / q" . "toggle the pane / close the reader"))
+    (("C-w j" . "go to the question box") . ("p" . "copy the cache file path"))
+    (("d" . "delete the question at point") . ("D" . "explain the whole file in detail"))
+    (("C" . "collapse all sections") . ("s" . "explain this section in detail")))
   "Rows of the key guide.
 Each row is (LEFT . RIGHT), and each cell is (KEY . TEXT), or nil for an empty cell.")
 

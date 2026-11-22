@@ -25,9 +25,10 @@
 (defvar code-reader-timeout)
 (defvar code-reader-model)
 
-(declare-function code-reader-ui-render "code-reader-ui" (view &optional keep-top reveal-id))
+(declare-function code-reader-ui-render "code-reader-ui" (view &optional keep-top reveal-id show-details))
 (declare-function code-reader-ui-update-header "code-reader-ui" (view))
 (declare-function code-reader-sync-place-view "code-reader-sync" (view))
+(declare-function code-reader-sync-refresh-highlight "code-reader-sync" (view))
 
 (cl-defstruct (code-reader-view (:constructor code-reader-view--create) (:copier nil))
   "State shared by a source buffer and its explanation buffer."
@@ -58,14 +59,22 @@
   scroll-side
   point-timer
   last-point
+  explanation-timer     ; idle timer for a sync after point moved in the explanation
+  explanation-last-point
   sync-target           ; id of the section last placed by sync
+  sync-detail-line      ; source line of the detail entry last placed by sync, or nil
   synced-source-start   ; window start we last set in the source pane
   synced-exp-start      ; window start we last set in the explanation pane
   synced-exp-size       ; (WIDTH HEIGHT) of the explanation pane when we last synced it
-  active-section-id)
+  active-section-id
+  active-detail-line    ; source line of the highlighted detail entry, or nil for the section
+  detail)               ; status of the detail explanation, a plist, or nil (see `code-reader-session--set-detail-failure')
 
 (defvar code-reader-session--views nil
   "All live views, newest first.")
+
+(defvar code-reader-session--detail-requests nil
+  "Alist of (REQUEST-ID . VIEW) for detail explanations not yet finished.")
 
 (defvar code-reader-session--counter 0
   "Counter used to make request ids unique within this Emacs.")
@@ -111,16 +120,19 @@ Signal a user error when BUFFER is not visiting a file."
 (defun code-reader-session-dispose (view)
   "Forget VIEW: cancel its timers and request, and kill its explanation buffer."
   (dolist (timer (list (code-reader-view-scroll-timer view)
-                       (code-reader-view-point-timer view)))
+                       (code-reader-view-point-timer view)
+                       (code-reader-view-explanation-timer view)))
     (when (timerp timer)
       (cancel-timer timer)))
   (when (and (code-reader-view-pending-id view)
              (code-reader-transport-connected-p))
     (code-reader--safely "cancel on dispose"
       (code-reader--send (list :type "cancel" :id (code-reader-view-pending-id view)))))
+  (code-reader-session--cancel-detail view)
   (setf (code-reader-view-pending-id view) nil
         (code-reader-view-scroll-timer view) nil
-        (code-reader-view-point-timer view) nil)
+        (code-reader-view-point-timer view) nil
+        (code-reader-view-explanation-timer view) nil)
   (code-reader-session--release-sections view)
   (code-reader-session--release-target view)
   (let ((explanation (code-reader-view-explanation-buffer view)))
@@ -300,8 +312,12 @@ the file may have grown or shrunk since the last request."
      :use-cache nil :note (code-reader-view-note view))))
 
 (defun code-reader-session-cancel (view)
-  "Cancel VIEW's pending request.  Return non-nil when one was cancelled."
-  (let ((id (code-reader-view-pending-id view)))
+  "Cancel VIEW's pending request, and any detail explanation running for it.
+Return non-nil when something was cancelled."
+  (let* ((id (code-reader-view-pending-id view))
+         (detail (code-reader-session--cancel-detail view)))
+    (when detail
+      (code-reader-ui-update-header view))
     (when id
       (setf (code-reader-view-pending-id view) nil
             (code-reader-view-status view) 'idle
@@ -309,8 +325,8 @@ the file may have grown or shrunk since the last request."
       (if (code-reader-transport-connected-p)
           (code-reader--send (list :type "cancel" :id id))
         (code-reader--log "cancel for %s dropped: engine not connected" id))
-      (code-reader-ui-render view)
-      t)))
+      (code-reader-ui-render view))
+    (or (and id t) detail)))
 
 ;;; Sections
 
@@ -637,6 +653,144 @@ document is taken and drawn again."
                    (or (plist-get event :message) (plist-get event :code) type))))
         t))))
 
+;;; Detail explanation
+
+(defun code-reader-session--detail-ids (view)
+  "Return the request ids of the detail explanations that VIEW has running."
+  (let ((ids nil))
+    (dolist (entry code-reader-session--detail-requests (nreverse ids))
+      (when (eq (cdr entry) view)
+        (push (car entry) ids)))))
+
+(defun code-reader-session--forget-detail (id)
+  "Stop waiting for the detail explanation ID."
+  (setq code-reader-session--detail-requests
+        (cl-remove id code-reader-session--detail-requests :key #'car :test #'equal)))
+
+(defun code-reader-session--cancel-detail (view)
+  "Stop the detail explanations VIEW has running.  Return non-nil when there were any."
+  (let ((ids (code-reader-session--detail-ids view)))
+    (dolist (id ids)
+      (code-reader-session--forget-detail id)
+      (if (code-reader-transport-connected-p)
+          (code-reader--safely "cancel detail"
+            (code-reader--send (list :type "cancel" :id id)))
+        (code-reader--log "cancel for %s dropped: engine not connected" id)))
+    (setf (code-reader-view-detail view) nil)
+    (and ids t)))
+
+(defun code-reader-session-check-detail-start (view)
+  "Signal a user error when a detail explanation cannot start for VIEW now."
+  (unless (code-reader-view-explanation-key view)
+    (user-error "Code Reader: there is no explanation to add detail to yet"))
+  (when (code-reader-session--detail-ids view)
+    (user-error "Code Reader: the detail explanation is already running; c cancels it")))
+
+(defun code-reader-session-highlighted-section (view)
+  "Return VIEW's highlighted section, or signal a user error when none is highlighted."
+  (let* ((id (code-reader-view-active-section-id view))
+         (section (and id (code-reader-session-section-by-id view id))))
+    (or section
+        (user-error "Code Reader: no section is highlighted; move the cursor in the source"))))
+
+(defun code-reader-session-explain-detail (view &optional section)
+  "Explain VIEW's explanation line by line: the whole file, or only SECTION when one is given.
+The engine answers with the same explanation, and each lines group gets a \"Detail
+explanation\" subsection with one entry per line of code.  Claude is asked for a few
+dozen lines at a time, so this can take a few minutes, and less for one section.  A
+detail explanation already running for VIEW is not started a second time."
+  (code-reader-session-check-detail-start view)
+  (let* ((source (code-reader-view-source-buffer view))
+         (id (code-reader-session--new-id))
+         (lines (if section
+                    (cons (plist-get section :start-line) (plist-get section :end-line))
+                  (code-reader-session-whole-file-lines source)))
+         (task (if section "explain_detail_section" "explain_detail"))
+         (request (with-current-buffer source
+                    (code-reader-session-build-request
+                     :id id :task task
+                     :start-line (car lines) :end-line (cdr lines) :use-cache nil))))
+    (setq request (plist-put request :explanation_key (code-reader-view-explanation-key view)))
+    (setq request (plist-put request :view (format "%s#detail-%s" (code-reader-view-file view) id)))
+    (push (cons id view) code-reader-session--detail-requests)
+    (setf (code-reader-view-detail view) (list :status 'running :started (float-time)))
+    (code-reader-ui-update-header view)
+    (message (if section
+                 (format "Code Reader: explaining lines %d–%d in detail" (car lines) (cdr lines))
+               "Code Reader: explaining every line in detail; this can take a few minutes"))
+    (code-reader-transport-connect
+     (lambda (error-message)
+       (if error-message
+           (code-reader-session--detail-failed id error-message)
+         (condition-case err
+             (code-reader--send request)
+           (error (code-reader-session--detail-failed id (error-message-string err)))))))))
+
+(defun code-reader-session--detail-failed (id message)
+  "Report that the detail explanation ID could not be sent, because of MESSAGE."
+  (let ((entry (assoc id code-reader-session--detail-requests)))
+    (when entry
+      (code-reader-session--forget-detail id)
+      (code-reader-session--set-detail-failure (cdr entry) message))))
+
+(defun code-reader-session--set-detail-failure (view message)
+  "Show MESSAGE as the failure of VIEW's detail explanation, until the next one starts."
+  (setf (code-reader-view-detail view) (list :status 'failed :message message))
+  (code-reader-ui-update-header view)
+  (message "Code Reader: detail explanation failed: %s" message))
+
+(defun code-reader-session--detail-error-text (event)
+  "Return the reason in the error EVENT of a detail explanation, as one short line."
+  (if (equal (plist-get event :code) "bad_request")
+      ;; An engine started before this request existed rejects it as a bad request.
+      "engine is out of date, run M-x code-reader-shutdown-engine"
+    (or (plist-get event :message) (plist-get event :code) "error")))
+
+(defun code-reader-session--on-detail-progress (view event)
+  "Record the progress EVENT of VIEW's detail explanation: its pieces done, and when it began."
+  (let* ((old (code-reader-view-detail view))
+         (steps (plist-get event :steps)))
+    (setf (code-reader-view-detail view)
+          (list :status 'running
+                :started (or (plist-get old :started) (float-time))
+                :done (if steps (plist-get steps :done) (plist-get old :done))
+                :total (if steps (plist-get steps :total) (plist-get old :total))))
+    (code-reader-ui-update-header view)))
+
+(defun code-reader-session--on-detail-result (view event)
+  "Take the explanation in EVENT, which has the detail subsections, into VIEW, and draw it.
+The details are opened, so the reader sees them at once, and the detail line under the
+source cursor is selected without moving the pane."
+  (setf (code-reader-view-detail view) nil)
+  (code-reader-session-apply-result view event)
+  (code-reader-ui-render view t nil t)
+  (when (fboundp 'code-reader-sync-refresh-highlight)
+    (code-reader-sync-refresh-highlight view))
+  (message "Code Reader: detail explanation ready"))
+
+(defun code-reader-session--detail-event (event)
+  "Handle EVENT if it belongs to a detail explanation.  Return non-nil when it did."
+  (let* ((id (plist-get event :id))
+         (entry (and (stringp id) (assoc id code-reader-session--detail-requests))))
+    (when entry
+      (let ((view (cdr entry))
+            (type (plist-get event :type)))
+        (cond
+         ((equal type "progress")
+          (code-reader-session--on-detail-progress view event))
+         ((equal type "result")
+          (code-reader-session--forget-detail id)
+          (code-reader-session--on-detail-result view event))
+         ((equal type "cancelled")
+          (code-reader-session--forget-detail id)
+          (setf (code-reader-view-detail view) nil)
+          (code-reader-ui-update-header view)
+          (message "Code Reader: detail explanation cancelled"))
+         (t
+          (code-reader-session--forget-detail id)
+          (code-reader-session--set-detail-failure view (code-reader-session--detail-error-text event))))
+        t))))
+
 ;;; Deleting a question
 
 (defvar code-reader-session--delete-requests nil
@@ -696,7 +850,8 @@ The engine does the deleting, and the view takes the explanation it sends back."
   "Dispatch one engine EVENT: a question, a section refresh, a deletion, or an explanation event."
   (unless (or (code-reader-chat-handle-event event)
               (code-reader-session--section-event event)
-              (code-reader-session--delete-event event))
+              (code-reader-session--delete-event event)
+              (code-reader-session--detail-event event))
     (code-reader-session--dispatch event)))
 
 (defun code-reader-session--dispatch (event)

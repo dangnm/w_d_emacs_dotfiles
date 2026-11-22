@@ -18,6 +18,8 @@ Behaviour is chosen with ``FAKE_CLAUDE_MODE``:
 * ``is_error``: the result reports an API error.
 * ``no_result``: exits 1 with stderr only.
 * ``echo_argv``: like ``ok`` but writes the argv to ``FAKE_CLAUDE_ARGV_LOG``.
+* ``detail_skip``: a detail explanation leaves out the first code line of each call.
+* ``detail_bad``: a detail explanation has no ``lines`` list.
 """
 
 from __future__ import annotations
@@ -65,10 +67,31 @@ def _save_state(path: str, known: set[str]) -> None:
         json.dump(sorted(known), handle)
 
 
+def _detail_structured(prompt: str, mode: str) -> dict:
+    """Explain each code line of the target, as the detail prompt asks, from the numbered snapshot."""
+    if mode == "detail_bad":
+        return {"notes": ["no lines list"]}
+    match = re.search(r"Target lines:\s*(\d+)-(\d+)", prompt)
+    start, end = (int(match.group(1)), int(match.group(2))) if match else (1, 1)
+    code = {int(number): text for number, text in re.findall(r"^\s*(\d+)\| (.*)$", prompt, re.MULTILINE)}
+    lines = []
+    skipped = False
+    for number in range(start, end + 1):
+        if not code.get(number, "").strip():
+            continue
+        if mode == "detail_skip" and not skipped:
+            skipped = True
+            continue
+        lines.append({"line": number, "explanation": f"Giải thích dòng {number}."})
+    return {"lines": lines}
+
+
 def _structured(prompt: str, mode: str) -> dict:
+    if "Detail task:" in prompt:
+        return _detail_structured(prompt, mode)
     if "Section refresh:" in prompt:
         return {"explanation": "Giải thích làm mới giả lập cho đoạn này."}
-    if "Question from the reader:" in prompt:
+    if "Question from the reader" in prompt:
         return {"answer": "Đây là câu trả lời giả lập cho câu hỏi."}
     match = re.search(r"Target lines:\s*(\d+)-(\d+)", prompt)
     start, end = (int(match.group(1)), int(match.group(2))) if match else (1, 1)
