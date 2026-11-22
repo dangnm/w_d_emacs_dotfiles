@@ -19,25 +19,92 @@
 
 ;;; Helpers
 
+(defconst code-reader-test--key (make-string 64 ?a)
+  "A well-formed explanation key, as the engine sends it.")
+
 (defun code-reader-test--result (id sections &rest extra)
-  "Return a protocol `result' event with request ID, SECTIONS and EXTRA plist entries."
-  (append (list :type "result"
+  "Return a protocol `result' event with request ID and SECTIONS.
+EXTRA is a plist that overrides the defaults.  The document is built from
+SECTIONS, with the summary and lists the defaults name, as the engine would."
+  (append extra
+          (list :type "result"
                 :id id
                 :task "explain_file"
                 :cache_hit :false
+                :explanation_key code-reader-test--key
                 :summary "T\u00f3m t\u1eaft."
                 :sections sections
+                :document (code-reader-test--document sections)
                 :dependencies (list "dep-one")
                 :data_flow nil
                 :notes (list "a note")
                 :warnings (list (list :code "context_truncated"
                                       :message "context was cut"
-                                      :section_id nil)))
-          extra))
+                                      :section_id nil)))))
 
 (defun code-reader-test--section (id start end title text)
   "Return a protocol section plist."
   (list :id id :source_start start :source_end end :title title :explanation text))
+
+(defun code-reader-test--body (text)
+  "Return TEXT indented the way the engine indents the body of a heading."
+  (mapconcat (lambda (line) (if (string-empty-p line) "" (concat "  " line)))
+             (split-string text "\n") "\n"))
+
+(defun code-reader-test--section-org (section)
+  "Return the Org heading, drawer, text and questions of protocol SECTION."
+  (let* ((start (plist-get section :source_start))
+         (end (plist-get section :source_end))
+         (title (plist-get section :title))
+         (org (format "* Lines %d–%d%s\n  :PROPERTIES:\n  :KIND: section\n  :SECTION_ID: %s\n  :LINES: %d-%d\n  :END:\n%s\n"
+                      start end
+                      (if (and (stringp title) (not (string-empty-p title)))
+                          (format " · %s" title)
+                        "")
+                      (plist-get section :id) start end
+                      (code-reader-test--body (plist-get section :explanation)))))
+    (dolist (followup (plist-get section :followups))
+      (setq org (concat org
+                        (format "** Question: %s\n  :PROPERTIES:\n  :KIND: question\n  :CREATED: %s\n  :END:\n%s\n"
+                                (plist-get followup :question)
+                                (or (plist-get followup :created_at) "2026-11-22T10:00:00")
+                                (code-reader-test--body (plist-get followup :answer))))))
+    org))
+
+(defun code-reader-test--document (sections)
+  "Return the Org text the engine would send for SECTIONS and the default lists."
+  (concat "#+TITLE: sample.el\n#+STARTUP: overview\n#+OPTIONS: ^:nil\n\n"
+          "* Summary\n  :PROPERTIES:\n  :KIND: summary\n  :END:\n  T\u00f3m t\u1eaft.\n\n"
+          (mapconcat #'code-reader-test--section-org sections "")
+          "* Dependencies\n  :PROPERTIES:\n  :KIND: dependencies\n  :END:\n  - dep-one\n\n"
+          "* Notes\n  :PROPERTIES:\n  :KIND: notes\n  :END:\n  - a note\n\n"
+          "* Warnings\n  :PROPERTIES:\n  :KIND: warnings\n  :END:\n  - [context_truncated] context was cut\n\n"))
+
+(defun code-reader-test--with-followup (sections id question answer)
+  "Return SECTIONS with QUESTION and ANSWER nested under the section with ID."
+  (mapcar (lambda (section)
+            (if (equal (plist-get section :id) id)
+                (append section (list :followups (list (list :question question :answer answer
+                                                             :created_at "2026-11-22T10:00:00"))))
+              section))
+          sections))
+
+(defun code-reader-test--replace-explanation (sections id text)
+  "Return SECTIONS with the explanation of the section ID replaced by TEXT."
+  (mapcar (lambda (section)
+            (if (equal (plist-get section :id) id)
+                (let ((copy (copy-sequence section)))
+                  (plist-put copy :explanation text)
+                  copy)
+              section))
+          sections))
+
+(defun code-reader-test--text-pos (string)
+  "Return the position where STRING starts in the current buffer, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (when (search-forward string nil t)
+      (match-beginning 0))))
 
 (defun code-reader-test--source-buffer (line-count &optional file)
   "Return a fresh emacs-lisp buffer with LINE-COUNT lines, visiting FILE."
@@ -238,33 +305,18 @@ Binds `view', `source', `src-win' and `exp-win'."
 
 ;;; Stale detection
 
-(ert-deftest code-reader-test-stale-after-edit-and-not-after-identical-text ()
-  "An edit marks a ready view stale; an edit that restores the text does not."
+(ert-deftest code-reader-test-edits-do-not-expire-the-explanation ()
+  "An edit leaves a ready explanation in place, with no stale notice, until it is refreshed."
   (let* ((source (code-reader-test--source-buffer 8))
          (view (code-reader-session-view-for source)))
     (unwind-protect
         (progn
-          (setf (code-reader-view-status view) 'ready
-                (code-reader-view-snapshot-hash view)
-                (secure-hash 'sha256 (code-reader-session--buffer-text source))
-                (code-reader-view-snapshot-tick view)
-                (with-current-buffer source (buffer-chars-modified-tick)))
-          ;; No change yet: nothing happens.
-          (code-reader-session-check-stale view)
-          (should (eq (code-reader-view-status view) 'ready))
-          ;; Insert and delete the same text: the tick moves, the text does not.
-          (with-current-buffer source
-            (goto-char (point-min))
-            (insert "x")
-            (delete-char -1))
-          (code-reader-session-check-stale view)
-          (should (eq (code-reader-view-status view) 'ready))
-          ;; A real change makes the view stale.
+          (setf (code-reader-view-status view) 'ready)
           (with-current-buffer source
             (goto-char (point-min))
             (insert "changed\n"))
-          (code-reader-session-check-stale view)
-          (should (eq (code-reader-view-status view) 'stale)))
+          (should (eq (code-reader-view-status view) 'ready))
+          (should-not (string-match-p "stale" (code-reader-ui-header-string view))))
       (code-reader-session-dispose view)
       (kill-buffer source))))
 
@@ -410,8 +462,9 @@ Binds `view', `source', `src-win' and `exp-win'."
               (should (string-match-p "\\[context_truncated\\] context was cut" (buffer-string)))
               (let ((heading (code-reader-test--heading-pos view "rend-1-s1")))
                 (should heading)
-                (should (equal (get-text-property heading 'code-reader-source-start) 3))
-                (should (equal (get-text-property heading 'code-reader-source-end) 5)))
+                (goto-char heading)
+                (should (looking-at "\\* Lines 3–5 · Gán giá trị"))
+                (should (markerp (plist-get (car (code-reader-view-sections view)) :exp-start))))
               (should (string-match-p "ready" header-line-format))
               (should (string-match-p "explain_block\\|block" header-line-format)))))
       (code-reader-session-dispose view)
@@ -440,9 +493,10 @@ Binds `view', `source', `src-win' and `exp-win'."
                         (marker-position (plist-get second :exp-start))))
             (code-reader-sync--highlight-active view first)
             (with-current-buffer buffer
-              (should (overlayp code-reader-highlight--active-overlay))
-              (should (<= (overlay-end code-reader-highlight--active-overlay)
-                          (marker-position (plist-get second :exp-start)))))))
+              (should code-reader-highlight--active-marks)
+              (should (cl-every (lambda (ov)
+                                  (< (overlay-start ov) (marker-position (plist-get second :exp-start))))
+                                code-reader-highlight--active-marks)))))
       (code-reader-session-dispose view)
       (kill-buffer source))))
 
@@ -455,11 +509,13 @@ Binds `view', `source', `src-win' and `exp-win'."
           (setq code-reader-guide--last-window src-win)
           (select-window exp-win)
           (code-reader-guide--post-command)
-          (should (window-live-p code-reader-guide--window))
-          (should (= (nth 1 (window-edges code-reader-guide--window))
+          (should code-reader-guide--shown)
+          (should (eq (window-buffer (code-reader-chat-panel-window))
+                      (get-buffer code-reader-guide-buffer-name)))
+          (should (= (nth 1 (window-edges (code-reader-chat-panel-window)))
                      (nth 3 (window-edges exp-win))))
           (should (string-match-p "jump to source"
-                                  (with-current-buffer (window-buffer code-reader-guide--window)
+                                  (with-current-buffer (window-buffer (code-reader-chat-panel-window))
                                     (buffer-string)))))
       (code-reader-guide-hide))))
 
@@ -472,24 +528,24 @@ Binds `view', `source', `src-win' and `exp-win'."
           (setq code-reader-guide--last-window src-win)
           (select-window exp-win)
           (code-reader-guide--post-command)
-          (should (window-live-p code-reader-guide--window))
+          (should code-reader-guide--shown)
           ;; A command that leaves the cursor where it is keeps the guide.
           (code-reader-guide--post-command)
-          (should (window-live-p code-reader-guide--window))
+          (should code-reader-guide--shown)
           ;; Moving the cursor inside the explanation pane hides it.
           (with-current-buffer (window-buffer exp-win) (goto-char (point-min)))
           (code-reader-guide--post-command)
-          (should-not (window-live-p code-reader-guide--window))
+          (should-not code-reader-guide--shown)
           ;; Back to the source, then into the explanation again.
           (select-window src-win)
           (code-reader-guide--post-command)
           (select-window exp-win)
           (code-reader-guide--post-command)
-          (should (window-live-p code-reader-guide--window))
+          (should code-reader-guide--shown)
           ;; Leaving for the source hides it.
           (select-window src-win)
           (code-reader-guide--post-command)
-          (should-not (window-live-p code-reader-guide--window)))
+          (should-not code-reader-guide--shown))
       (code-reader-guide-hide))))
 
 (ert-deftest code-reader-test-layout-installs-the-key-guide ()
@@ -530,8 +586,683 @@ Binds `view', `source', `src-win' and `exp-win'."
     (should (string-match-p "RET: jump to source" text))
     (should (string-match-p "g: refresh" text))
     (should (string-match-p "c: cancel" text))
+    (should (string-match-p "r: refresh this section" text))
     (should (string-match-p "t / q: hide pane, close" text))
-    (should (= (length (code-reader-guide--lines)) (+ 2 (length code-reader-guide-rows))))))
+    (should (string-match-p "p: copy cache path" text))
+    (should (string-match-p "d: delete the question at point" text))
+    (should (= (length (code-reader-guide--lines)) (+ 2 (length code-reader-guide-rows))))
+    ;; The whole table fits in the bottom panel.
+    (should (<= (length (code-reader-guide--lines)) code-reader-chat-lines))))
+
+(ert-deftest code-reader-test-copy-cache-path-shows-and-copies-the-path ()
+  "The p key shows the explanation's cache file, and copies its path to the kill ring and clipboard."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (let ((copied nil)
+          (path "/tmp/cache/dotfiles-3f9a2c/lisp/sample.el/whole-file-English-abcd1234.org"))
+      (setf (code-reader-view-cache-path view) path)
+      (cl-letf (((symbol-function 'code-reader-commands--copy-to-clipboard)
+                 (lambda (text) (setq copied text))))
+        (with-current-buffer (code-reader-view-explanation-buffer view)
+          (code-reader-copy-cache-path)))
+      (should (equal (car kill-ring) path))
+      (should (equal copied path)))
+    (setf (code-reader-view-cache-path view) nil)
+    (with-current-buffer (code-reader-view-explanation-buffer view)
+      (should-error (code-reader-copy-cache-path) :type 'user-error))))
+
+(ert-deftest code-reader-test-chat-box-sits-under-the-explanation ()
+  "The bottom panel, which holds the question box, sits directly below the explanation when shown."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (should-not (code-reader-chat--window view))
+    (code-reader-chat-show view exp-win)
+    (let ((panel (code-reader-chat--window view)))
+      (should (window-live-p panel))
+      (should (= (nth 1 (window-edges panel)) (nth 3 (window-edges exp-win))))
+      (should (eq (window-buffer panel) (code-reader-chat--buffer-of view)))
+      ;; The key table must fit the panel, or it would be cut off.
+      (should (<= (code-reader-guide--height) code-reader-chat-lines))
+      (code-reader-ui-hide-panel view)
+      (should-not (code-reader-chat--window view))
+      (should-not (window-live-p panel)))))
+
+(ert-deftest code-reader-test-key-table-is-shown-only-while-the-cursor-is-in-the-explanation ()
+  "The bottom panel shows the key table on entering the explanation, and goes away once the
+cursor moves in it.  Then the explanation takes the whole column again."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (setq code-reader-guide--last-window src-win)
+    (select-window exp-win)
+    (code-reader-guide--post-command)
+    (should code-reader-guide--shown)
+    (should (eq (window-buffer (code-reader-chat--window view))
+                (get-buffer code-reader-guide-buffer-name)))
+    (with-current-buffer (window-buffer exp-win) (goto-char (point-min)))
+    (code-reader-guide--post-command)
+    (should-not code-reader-guide--shown)
+    (should-not (code-reader-chat-panel-window))
+    (should (= (nth 3 (window-edges exp-win)) (nth 3 (window-edges src-win))))))
+
+(ert-deftest code-reader-test-leaving-the-panel-hides-it ()
+  "Selecting the explanation again, after the question box was used, hides the panel."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-commands--install-pane-hooks view)
+    (code-reader-chat-focus)
+    (should (code-reader-chat-panel-window))
+    (select-window exp-win)
+    (code-reader-guide--post-command)
+    (should-not (code-reader-chat-panel-window))
+    (should (= (nth 3 (window-edges exp-win)) (nth 3 (window-edges src-win))))))
+
+(ert-deftest code-reader-test-selecting-the-panel-shows-the-question-box ()
+  "Selecting the panel while the key table is in it clears the table and shows the
+question box, and what is typed in the box is not moved by the hook."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-commands--install-pane-hooks view)
+    (setq code-reader-guide--last-window src-win)
+    (select-window exp-win)
+    (code-reader-guide--post-command)
+    (should code-reader-guide--shown)
+    (select-window (code-reader-chat-panel-window))
+    (code-reader-guide--post-command)
+    (let ((box (code-reader-chat--buffer-of view)))
+      (should-not code-reader-guide--shown)
+      (should (eq (window-buffer (code-reader-chat-panel-window)) box))
+      (should (eq (current-buffer) box))
+      (with-current-buffer box (insert "abc") (goto-char (point-min)))
+      (code-reader-guide--post-command)
+      (should (= (with-current-buffer box (point)) (point-min)))
+      (should (equal (with-current-buffer box (buffer-string)) "abc")))))
+
+(ert-deftest code-reader-test-chat-header-names-the-highlighted-section ()
+  "The question box says which lines the next question is about."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "w-s2"))
+    (should (string-match-p "About lines 11–30 · Setup"
+                            (with-current-buffer (code-reader-chat--buffer-of view) header-line-format)))))
+
+(ert-deftest code-reader-test-chat-sends-all-typed-text-wherever-point-is ()
+  "Text typed in the box survives a redraw, and is sent whole even when point is at its start."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "w-s2"))
+    (let ((sent nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'code-reader-transport-connect)
+                     (lambda (callback) (funcall callback nil)))
+                    ((symbol-function 'code-reader--send)
+                     (lambda (request) (setq sent request))))
+            (with-current-buffer (code-reader-chat--buffer-of view)
+              (insert "what is DISTINCT?")
+              (code-reader-chat-refresh view)
+              (should (equal (code-reader-chat--input-text) "what is DISTINCT?"))
+              (goto-char (point-min))
+              (insert "Q: ")
+              (code-reader-chat-send)
+              (should (equal (plist-get sent :question) "Q: what is DISTINCT?"))
+              (should (equal (code-reader-chat--input-text) ""))))
+        (setq code-reader-chat--pending nil)))))
+
+(ert-deftest code-reader-test-chat-question-is-a-follow-up-with-its-own-view ()
+  "A question becomes a follow_up request for the section's lines, on a view of its own."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (let* ((section (code-reader-session-section-by-id view "w-s2"))
+           (request (code-reader-chat--request view section "Why?" "chat-1"))
+           (target (plist-get request :target)))
+      (should (equal (plist-get request :task) "follow_up"))
+      (should (equal (plist-get request :question) "Why?"))
+      (should (string-suffix-p "#chat-chat-1" (plist-get request :view)))
+      (should (equal (plist-get target :start_line) 11))
+      (should (equal (plist-get target :end_line) 30)))))
+
+(ert-deftest code-reader-test-chat-answer-is-nested-under-its-section ()
+  "An answer is a question nested under the section it was asked about."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (setq code-reader-chat--pending (list (cons "chat-a" view)))
+    (should-not (code-reader-chat-handle-event (list :type "result" :id "other-id")))
+    (should (code-reader-chat-handle-event
+             (code-reader-test--result
+              "chat-a"
+              (code-reader-test--with-followup code-reader-test--window-sections "w-s2"
+                                               "Why?" "Because the tests say so.")
+              :task "follow_up" :question "Why?" :answer "Because the tests say so."
+              :target (list :start_line 11 :end_line 30))))
+    (should-not code-reader-chat--pending)
+    (should (equal (plist-get (code-reader-session-section-by-id view "w-s2") :id) "w-s2"))
+    (with-current-buffer (code-reader-view-explanation-buffer view)
+      (should (string-match-p "\\*\\* Question: Why\\?" (buffer-string)))
+      (should (string-match-p "Because the tests say so\\." (buffer-string)))
+      ;; The section is opened so the new question is in view. Its answer stays folded.
+      (should-not (invisible-p (code-reader-test--text-pos "** Question: Why?")))
+      (should (invisible-p (code-reader-test--text-pos "Because the tests say so."))))))
+
+(ert-deftest code-reader-test-answer-keeps-the-cursor-where-it-was ()
+  "An answer redraws the explanation, and the cursor stays on the line it was on."
+  (let ((sections (list (code-reader-test--section "k-s1" 1 10 "One" "a1\na2\na3")
+                        (code-reader-test--section "k-s2" 11 20 "Two" "b1\nb2\nb3"))))
+    (code-reader-test--with-panes 30 sections
+      (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "k-s2"))
+      ;; The reader opens the second section and puts the cursor on its second line.
+      (with-selected-window exp-win
+        (with-current-buffer (code-reader-view-explanation-buffer view)
+          (goto-char (code-reader-test--heading-pos view "k-s2"))
+          (org-cycle)
+          (goto-char (code-reader-test--text-pos "b2"))
+          (set-window-point exp-win (point))))
+      (set-window-start exp-win (code-reader-test--heading-pos view "k-s1") t)
+      ;; The question is about the section the cursor is in.
+      (setq code-reader-chat--pending (list (cons "chat-k" view)))
+      (should (code-reader-chat-handle-event
+               (code-reader-test--result
+                "chat-k"
+                (code-reader-test--with-followup sections "k-s2" "Why?" "Because.")
+                :task "follow_up" :question "Why?" :answer "Because."
+                :target (list :start_line 11 :end_line 20))))
+      ;; The cursor is still on its line, and in view after a real redisplay.
+      (should (equal (code-reader-test--line-at exp-win (window-point exp-win)) "  b2"))
+      (should (code-reader-ui--point-in-window-p (window-point exp-win) exp-win)))))
+
+(ert-deftest code-reader-test-chat-focus-moves-to-the-question-box ()
+  "The `a' key in the explanation pane moves to the question box."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (select-window exp-win)
+    (code-reader-chat-focus)
+    (should (eq (selected-window) (code-reader-chat--window view)))))
+
+(ert-deftest code-reader-test-chat-send-sends-the-question-and-clears-the-box ()
+  "RET in the question box sends the question about the highlighted section, then clears the box."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "w-s2"))
+    (let ((sent nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'code-reader-transport-connect)
+                     (lambda (callback) (funcall callback nil)))
+                    ((symbol-function 'code-reader--send)
+                     (lambda (request) (setq sent request))))
+            (with-current-buffer (code-reader-chat--buffer-of view)
+              (goto-char (point-max))
+              (insert "Explain more about this?")
+              (code-reader-chat-send)
+              (should (equal (plist-get sent :task) "follow_up"))
+              (should (equal (plist-get sent :question) "Explain more about this?"))
+              (should (= (length code-reader-chat--pending) 1))
+              (should (equal (code-reader-chat--input-text) ""))))
+        (setq code-reader-chat--pending nil)))))
+
+(ert-deftest code-reader-test-jump-from-explanation-moves-the-source-window ()
+  "A jump started in the explanation pane moves the source window, not only the buffer point."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (set-window-point src-win (code-reader-test--line-pos source 150))
+    (select-window exp-win)
+    (code-reader-sync-jump view "w-s2")
+    (should (eq (selected-window) exp-win))
+    (should (= (with-current-buffer source (line-number-at-pos (window-point src-win) t)) 11))
+    (should (= (with-current-buffer source (line-number-at-pos (point) t)) 11))
+    (should (<= (window-start src-win) (code-reader-test--line-pos source 11)))))
+
+(ert-deftest code-reader-test-active-section-is-a-fringe-bar-not-a-background ()
+  "The active section is one fringe bar per line, and no overlay changes the text's face."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "w-s2"))
+    (let* ((buffer (code-reader-view-explanation-buffer view))
+           (marks (buffer-local-value 'code-reader-highlight--active-marks buffer)))
+      (should (> (length marks) 0))
+      (dolist (ov marks)
+        (should-not (overlay-get ov 'face))
+        (should (eq (car (get-text-property 0 'display (overlay-get ov 'before-string))) 'left-fringe))))))
+
+(ert-deftest code-reader-test-redraw-keeps-one-set-of-marks ()
+  "Redrawing the explanation keeps one set of marks on the active section, and none are left behind."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "w-s2"))
+    (let* ((buffer (code-reader-view-explanation-buffer view))
+           (count (length (buffer-local-value 'code-reader-highlight--active-marks buffer))))
+      (code-reader-ui-render view t)
+      (should (= (length (buffer-local-value 'code-reader-highlight--active-marks buffer)) count))
+      (should (= (length (with-current-buffer buffer
+                           (cl-remove-if-not (lambda (ov) (overlay-get ov 'code-reader))
+                                             (overlays-in (point-min) (point-max)))))
+                 count)))))
+
+(ert-deftest code-reader-test-clearing-the-active-marks-removes-them ()
+  "Clearing the active section removes every mark from the explanation buffer."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "w-s2"))
+    (let ((buffer (code-reader-view-explanation-buffer view)))
+      (code-reader-highlight-clear-active buffer)
+      (should-not (buffer-local-value 'code-reader-highlight--active-marks buffer))
+      (should-not (with-current-buffer buffer
+                    (cl-some (lambda (ov) (overlay-get ov 'code-reader))
+                             (overlays-in (point-min) (point-max))))))))
+
+(ert-deftest code-reader-test-leaving-the-panes-clears-the-source-marks ()
+  "Hiding or closing the explanation removes the fringe bars from the source buffer."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-sync-jump view "w-s2")
+    (should (buffer-local-value 'code-reader-highlight--source-marks source))
+    (code-reader-ui-hide-panel view)
+    (should-not (buffer-local-value 'code-reader-highlight--source-marks source))
+    (code-reader-ui-open view)
+    (code-reader-sync-jump view "w-s2")
+    (should (buffer-local-value 'code-reader-highlight--source-marks source))
+    (code-reader-ui-close view)
+    (should-not (buffer-local-value 'code-reader-highlight--source-marks source))))
+
+(ert-deftest code-reader-test-entering-the-explanation-does-not-move-the-source ()
+  "Showing the key guide on entering the explanation does not scroll the source.
+A genuine scroll of the explanation still does."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-sync-jump view "w-s2")
+    ;; The explanation is scrolled to another section, and the scroll sync follows it.
+    (set-window-start exp-win (code-reader-test--heading-pos view "w-s4"))
+    (code-reader-sync-explanation-scrolled view)
+    (let ((source-start (window-start src-win)))
+      (setq code-reader-guide--last-window src-win)
+      (select-window exp-win)
+      (code-reader-guide--post-command)
+      (should code-reader-guide--shown)
+      (code-reader-sync-explanation-scrolled view)
+      (should (= (window-start src-win) source-start))
+      ;; A genuine scroll of the explanation moves the source to the section at its top.
+      (set-window-start exp-win (code-reader-test--heading-pos view "w-s6"))
+      (code-reader-sync-explanation-scrolled view)
+      (should (= (window-start src-win) (code-reader-test--line-pos source 101))))
+    (code-reader-guide-hide)))
+
+(ert-deftest code-reader-test-entering-the-explanation-puts-the-cursor-on-the-highlighted-section ()
+  "Moving from the source into the explanation puts the cursor on the highlighted section.
+The key guide does not hide again on the next command, which the cursor move could cause."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (let ((src-win (code-reader-ui-source-window view)))
+      (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "w-s2"))
+      (set-window-point exp-win (code-reader-test--heading-pos view "w-s1"))
+      (setq code-reader-guide--last-window src-win)
+      (select-window exp-win)
+      (code-reader-guide--post-command)
+      (should (= (window-point exp-win) (code-reader-test--heading-pos view "w-s2")))
+      (should code-reader-guide--shown)
+      ;; The next command, in the explanation pane, does not move the cursor.
+      (code-reader-guide--post-command)
+      (should code-reader-guide--shown))
+    (code-reader-guide-hide)))
+
+(ert-deftest code-reader-test-clicking-into-the-explanation-keeps-the-click-point ()
+  "A click that enters the explanation keeps the cursor where it was pressed."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (let ((src-win (code-reader-ui-source-window view))
+          (pressed (code-reader-test--heading-pos view "w-s1")))
+      (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "w-s2"))
+      (set-window-point exp-win pressed)
+      (setq code-reader-guide--last-window src-win)
+      (select-window exp-win)
+      (let ((last-command-event (list 'mouse-1 (list exp-win 1 '(1 . 1) 0))))
+        (code-reader-guide--post-command))
+      (should (= (window-point exp-win) pressed)))
+    (code-reader-guide-hide)))
+
+(ert-deftest code-reader-test-entering-the-explanation-scrolls-to-a-highlighted-section-out-of-view ()
+  "When the highlighted section is out of view, entering the explanation shows it at the top.
+Sections are folded to one line each, so thirty of them are more than the pane shows."
+  (let ((many (cl-loop for i from 1 to 30
+                       collect (code-reader-test--section (format "m-s%d" i) (* 2 i) (* 2 i)
+                                                          (format "Title %d" i) "Text."))))
+    (code-reader-test--with-panes 100 many
+      (let ((src-win (code-reader-ui-source-window view)))
+        (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "m-s30"))
+        (with-current-buffer (code-reader-view-explanation-buffer view)
+          (set-window-start exp-win (point-min) t)
+          (set-window-point exp-win (point-min)))
+        (setq code-reader-guide--last-window src-win)
+        (select-window exp-win)
+        (code-reader-guide--post-command)
+        (should (= (window-start exp-win) (code-reader-test--heading-pos view "m-s30")))
+        (should (= (window-point exp-win) (code-reader-test--heading-pos view "m-s30"))))
+      (code-reader-guide-hide))))
+
+;;; Saved explanations
+
+(defun code-reader-test--saved-file (project-root state key model)
+  "Write a saved whole-file explanation of lisp/sample.el, where the engine writes it.
+It goes under PROJECT-ROOT's folder in STATE's cache, in the file's path, with KEY and
+MODEL in its header.  Return its path."
+  (let* ((folder (expand-file-name "lisp/sample.el"
+                                   (expand-file-name (code-reader-cache-project-folder project-root)
+                                                     (expand-file-name "cache/" state))))
+         (path (expand-file-name (format "whole-file-English-%s.org" (substring key 0 8)) folder)))
+    (make-directory folder t)
+    (with-temp-file path
+      (insert (format "#+TITLE: lisp/sample.el\n#+PROJECT: %s\n#+KEY: %s\n#+MODEL: %s\n"
+                      project-root key model)
+              "#+STARTUP: overview\n#+OPTIONS: ^:nil\n\n"
+              "* Summary\n  :PROPERTIES:\n  :KIND: summary\n  :END:\n  A saved summary.\n\n"
+              "* Lines 1–2 · Greet\n  :PROPERTIES:\n  :KIND: section\n  :SECTION_ID: saved-s1\n"
+              "  :LINES: 1-2\n  :END:\n  A saved explanation.\n\n"))
+    path))
+
+(defmacro code-reader-test--with-saved-project (model-var &rest body)
+  "Run BODY in a project with a source file, and a state directory that holds a saved explanation.
+Binds `root', `file', `state', `key', `saved' (the saved file's path) and `buffer',
+where the saved explanation's header names MODEL-VAR's value."
+  (declare (indent 1))
+  `(let* ((tmp (file-name-as-directory (make-temp-file "cr-saved-" t)))
+          (root (directory-file-name (file-truename (expand-file-name "project" tmp))))
+          (file (expand-file-name "lisp/sample.el" root))
+          (state (file-name-as-directory (expand-file-name "state" tmp)))
+          (key (make-string 64 ?b))
+          (code-reader-state-directory state)
+          (code-reader-explain-language "English")
+          (code-reader-model nil)
+          (buffer nil)
+          (view nil)
+          (saved-config (current-window-configuration))
+          (sync-hook-present (memq #'code-reader-sync--on-window-scroll window-scroll-functions)))
+     (unwind-protect
+         (progn
+           (make-directory (expand-file-name ".git" root) t)
+           (make-directory (file-name-directory file) t)
+           (with-temp-file file (insert "(defun a ())\n(defun b ())\n"))
+           (let ((saved (code-reader-test--saved-file root state key ,model-var)))
+             (setq buffer (find-file-noselect file))
+             ,@body))
+       (set-window-configuration saved-config)
+       ;; Opening the pane installs the scroll sync for the whole session; take it back out,
+       ;; so that the tests that follow see the scroll hook exactly as they did before.
+       (unless sync-hook-present
+         (remove-hook 'window-scroll-functions #'code-reader-sync--on-window-scroll))
+       (when view (code-reader-session-dispose view))
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer (set-buffer-modified-p nil))
+         (kill-buffer buffer))
+       (delete-directory tmp t))))
+
+(ert-deftest code-reader-test-cache-project-folder-matches-the-engine ()
+  "The folder name is the one the engine gives the same project (`project_folder' in cache.py)."
+  (should (equal (code-reader-cache-project-folder "/home/me/dotfiles") "dotfiles-ff7dbe"))
+  (should (equal (code-reader-cache-project-folder "/Users/x/My Project!") "My-Project-8e8f06")))
+
+(ert-deftest code-reader-test-open-shows-a-saved-explanation-without-the-engine ()
+  "Opening a file whose explanation is saved shows it, and the engine is never asked."
+  (code-reader-test--with-saved-project "default"
+    (cl-letf (((symbol-function 'code-reader-transport-connect)
+               (lambda (_callback) (error "The engine must not start"))))
+      (with-current-buffer buffer (code-reader-open)))
+    (setq view (code-reader-session-view-of buffer))
+    (should (eq (code-reader-view-status view) 'cached))
+    (should (equal (code-reader-view-explanation-key view) key))
+    (should (equal (code-reader-view-cache-path view) saved))
+    (should (equal (plist-get (car (code-reader-view-sections view)) :id) "saved-s1"))
+    (should (equal (code-reader-view-task view) "explain_file"))))
+
+(ert-deftest code-reader-test-a-saved-explanation-made-with-another-model-is-not-shown ()
+  "A saved explanation made with another model is not shown, so the engine makes a new one."
+  (code-reader-test--with-saved-project "sonnet"
+    (setq view (code-reader-session-view-for buffer))
+    (with-current-buffer buffer
+      (should-not (code-reader-cache-find view)))))
+
+;;; Deleting a question
+
+(ert-deftest code-reader-test-d-deletes-the-question-at-point-after-a-yes-or-no ()
+  "d asks yes or no.  No sends nothing.  Yes asks the engine to delete the question, and the
+answer leaves the pane once the engine has done it."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (let ((answered (code-reader-test--with-followup code-reader-test--window-sections
+                                                     "w-s2" "Why?" "Because.")))
+      (code-reader-session-apply-result view (code-reader-test--result "pane-1" answered))
+      (code-reader-ui-render view))
+    (should (equal (lookup-key code-reader-explanation-mode-map "d") #'code-reader-delete-question))
+    (let ((sent nil))
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (goto-char (code-reader-test--text-pos "** Question: Why?"))
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
+                  ((symbol-function 'code-reader-transport-connect) (lambda (callback) (funcall callback nil)))
+                  ((symbol-function 'code-reader--send) (lambda (request) (setq sent request))))
+          (code-reader-delete-question)))
+      (should-not sent)
+      (should (string-match-p "\\*\\* Question: Why\\?" (with-current-buffer (code-reader-view-explanation-buffer view)
+                                                         (buffer-string))))
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (goto-char (code-reader-test--text-pos "** Question: Why?"))
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                  ((symbol-function 'code-reader-transport-connect) (lambda (callback) (funcall callback nil)))
+                  ((symbol-function 'code-reader--send) (lambda (request) (setq sent request))))
+          (code-reader-delete-question)))
+      (should (equal (plist-get sent :task) "delete_question"))
+      (should (equal (plist-get sent :question_at) "2026-11-22T10:00:00"))
+      (should (equal (plist-get sent :explanation_key) code-reader-test--key))
+      (should (= (length code-reader-session--delete-requests) 1))
+      (code-reader-session-handle-event
+       (code-reader-test--result (plist-get sent :id) code-reader-test--window-sections
+                                 :task "delete_question"))
+      (should-not code-reader-session--delete-requests)
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (should-not (string-match-p "Why\\?" (buffer-string)))
+        (should (string-match-p "Setup text\\." (buffer-string)))))))
+
+(ert-deftest code-reader-test-d-outside-a-question-says-so-and-asks-nothing ()
+  "d on a section heading, or on text that is not a question, is refused without asking."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (with-current-buffer (code-reader-view-explanation-buffer view)
+      (goto-char (code-reader-test--heading-pos view "w-s2"))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) (error "must not ask"))))
+        (should-error (code-reader-delete-question) :type 'user-error)))))
+
+;;; Confirmations for commands that replace saved explanations
+
+(ert-deftest code-reader-test-g-asks-yes-or-no-before-it-replaces-the-explanation ()
+  "g asks first.  No keeps the saved explanation and asks Claude nothing; yes asks Claude."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (setf (code-reader-view-task view) "explain_file")
+    (let ((asked nil) (refreshed nil))
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (setq asked prompt) nil))
+                  ((symbol-function 'code-reader-session-refresh) (lambda (_view) (setq refreshed t))))
+          (code-reader-refresh)))
+      (should (string-match-p "Regenerate the explanation" asked))
+      (should-not refreshed))
+    (let ((refreshed nil))
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                  ((symbol-function 'code-reader-session-refresh) (lambda (_view) (setq refreshed t))))
+          (code-reader-refresh)))
+      (should refreshed))))
+
+(ert-deftest code-reader-test-g-with-nothing-to-refresh-asks-nothing ()
+  "g on a view that has no explanation yet says so, and does not ask."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (setf (code-reader-view-task view) nil)
+    (with-current-buffer (code-reader-view-explanation-buffer view)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) (error "must not ask"))))
+        (should-error (code-reader-refresh) :type 'user-error)))))
+
+(ert-deftest code-reader-test-clear-cache-asks-yes-or-no-before-it-deletes-everything ()
+  "Clearing the cache asks first.  No sends nothing; yes sends the clear request."
+  (let ((sent nil))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
+              ((symbol-function 'code-reader-commands--send-when-connected)
+               (lambda (object) (setq sent object))))
+      (code-reader-clear-cache))
+    (should-not sent)
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'code-reader-commands--send-when-connected)
+               (lambda (object) (setq sent object))))
+      (code-reader-clear-cache))
+    (should (equal sent '(:type "clear_cache")))))
+
+(ert-deftest code-reader-test-r-refreshes-the-highlighted-section ()
+  "The r key in the explanation pane is bound to the section refresh."
+  (should (eq (lookup-key code-reader-explanation-mode-map "r") #'code-reader-refresh-section)))
+
+(ert-deftest code-reader-test-section-refresh-covers-only-the-highlighted-lines ()
+  "A section refresh asks for the highlighted section's lines only, on a view of its own."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "w-s2"))
+    (let ((sent nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'code-reader-transport-connect)
+                     (lambda (callback) (funcall callback nil)))
+                    ((symbol-function 'code-reader--send)
+                     (lambda (request) (setq sent request))))
+            (code-reader-session-refresh-section view)
+            (should (equal (plist-get sent :task) "explain_section"))
+            (should (eq (plist-get sent :use_cache) :false))
+            (should (= (plist-get (plist-get sent :target) :start_line) 11))
+            (should (= (plist-get (plist-get sent :target) :end_line) 30))
+            (should (string-match-p "#refresh-" (plist-get sent :view)))
+            (should (= (length code-reader-session--section-requests) 1)))
+        (setq code-reader-session--section-requests nil)))))
+
+(ert-deftest code-reader-test-section-refresh-needs-a-highlighted-section ()
+  "Refreshing with no highlighted section tells the reader what to do."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (setf (code-reader-view-active-section-id view) nil)
+    (should-error (code-reader-session-refresh-section view) :type 'user-error)))
+
+(ert-deftest code-reader-test-section-refresh-replaces-only-that-explanation ()
+  "The new explanation replaces its own section's text in the document, and no other."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (setq code-reader-session--section-requests (list (cons "rf-1" view)))
+    (should-not (code-reader-session--section-event (list :type "result" :id "other-id")))
+    (should (code-reader-session--section-event
+             (code-reader-test--result
+              "rf-1"
+              (code-reader-test--replace-explanation code-reader-test--window-sections "w-s2"
+                                                     "A brand new explanation.")
+              :explanation "A brand new explanation."
+              :target (list :start_line 11 :end_line 30))))
+    (should-not code-reader-session--section-requests)
+    (with-current-buffer (code-reader-view-explanation-buffer view)
+      (should (string-match-p "A brand new explanation\\." (buffer-string)))
+      (should-not (string-match-p "Setup text\\." (buffer-string)))
+      (should (string-match-p "Intro text\\." (buffer-string))))))
+
+(ert-deftest code-reader-test-section-refresh-clears-only-its-own-questions ()
+  "A section refresh resets that section's questions; the other sections keep theirs."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (let ((asked (code-reader-test--with-followup
+                  (code-reader-test--with-followup code-reader-test--window-sections
+                                                   "w-s2" "Old question?" "An old answer.")
+                  "w-s1" "Keep this?" "Kept.")))
+      (code-reader-session-apply-result view (code-reader-test--result "pane-1" asked))
+      (code-reader-ui-render view)
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (should (string-match-p "Old question\\?" (buffer-string)))))
+    (setq code-reader-session--section-requests (list (cons "rf-3" view)))
+    (should (code-reader-session--section-event
+             (code-reader-test--result
+              "rf-3"
+              (code-reader-test--replace-explanation
+               (code-reader-test--with-followup code-reader-test--window-sections "w-s1" "Keep this?" "Kept.")
+               "w-s2" "Fresh explanation.")
+              :explanation "Fresh explanation."
+              :target (list :start_line 11 :end_line 30))))
+    (with-current-buffer (code-reader-view-explanation-buffer view)
+      (should-not (string-match-p "Old question\\?" (buffer-string)))
+      (should (string-match-p "Keep this\\?" (buffer-string)))
+      (should (string-match-p "Fresh explanation\\." (buffer-string))))))
+
+(ert-deftest code-reader-test-failed-section-refresh-is-forgotten ()
+  "An error for a section refresh stops the wait and keeps the old explanation."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (setq code-reader-session--section-requests (list (cons "rf-2" view)))
+    (should (code-reader-session--section-event
+             (list :type "error" :id "rf-2" :code "claude_failed" :message "boom")))
+    (should-not code-reader-session--section-requests)
+    (with-current-buffer (code-reader-view-explanation-buffer view)
+      (should (string-match-p "Setup text\\." (buffer-string))))))
+
+;;; Folding
+
+(ert-deftest code-reader-test-sections-start-folded-and-tab-opens-them ()
+  "Each section starts folded to its heading, the summary starts open, and TAB opens a section."
+  (let* ((source (code-reader-test--source-buffer 12))
+         (view (code-reader-session-view-for source)))
+    (unwind-protect
+        (progn
+          (setf (code-reader-view-pending-id view) "fold-1"
+                (code-reader-view-status view) 'queued)
+          (code-reader-session-handle-event
+           (code-reader-test--result
+            "fold-1" (list (code-reader-test--section "fold-1-s1" 1 3 "First" "First explanation."))))
+          (with-current-buffer (code-reader-view-explanation-buffer view)
+            (should-not (invisible-p (code-reader-test--text-pos "T\u00f3m t\u1eaft.")))
+            (should (invisible-p (code-reader-test--text-pos "First explanation.")))
+            (goto-char (code-reader-test--heading-pos view "fold-1-s1"))
+            (org-cycle)
+            (should-not (invisible-p (code-reader-test--text-pos "First explanation.")))))
+      (code-reader-session-dispose view)
+      (kill-buffer source))))
+
+(ert-deftest code-reader-test-redraw-keeps-open-sections-open ()
+  "A redraw keeps a section the reader opened open, and the other sections folded."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    ;; TAB is pressed in the explanation window, so that is the window it recentres.
+    (with-selected-window exp-win
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (goto-char (code-reader-test--heading-pos view "w-s2"))
+        (org-cycle)))
+    (code-reader-ui-render view t)
+    (with-current-buffer (code-reader-view-explanation-buffer view)
+      (should-not (invisible-p (code-reader-test--text-pos "Setup text.")))
+      (should (invisible-p (code-reader-test--text-pos "Intro text."))))))
+
+(defun code-reader-test--line-at (window position)
+  "Return the text of the line that POSITION is on, in WINDOW's buffer."
+  (with-current-buffer (window-buffer window)
+    (save-excursion
+      (goto-char position)
+      (buffer-substring-no-properties (line-beginning-position) (line-end-position)))))
+
+(ert-deftest code-reader-test-redraw-keeps-the-window-top-and-the-cursor ()
+  "A redraw keeps the line at the top of the window, and the cursor on its line when it is in view."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    ;; The reader opens the section, then puts the cursor on its text.
+    (with-selected-window exp-win
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (goto-char (code-reader-test--heading-pos view "w-s4"))
+        (org-cycle)))
+    (set-window-start exp-win (code-reader-test--heading-pos view "w-s4") t)
+    (set-window-point exp-win (with-current-buffer (code-reader-view-explanation-buffer view)
+                                (code-reader-test--text-pos "Body text.")))
+    (let ((cursor-line (code-reader-test--line-at exp-win (window-point exp-win))))
+      (code-reader-ui-render view t)
+      (should (= (window-start exp-win) (code-reader-test--heading-pos view "w-s4")))
+      (should (equal (code-reader-test--line-at exp-win (window-point exp-win)) cursor-line)))))
+
+(ert-deftest code-reader-test-cursor-off-screen-goes-to-the-top-line ()
+  "A cursor that was off screen is not brought back: a redraw puts it on the top line."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (set-window-start exp-win (code-reader-test--heading-pos view "w-s4") t)
+    (set-window-point exp-win (with-current-buffer (code-reader-view-explanation-buffer view)
+                                (code-reader-test--text-pos "Intro text.")))
+    (code-reader-ui-render view t)
+    (should (= (window-start exp-win) (code-reader-test--heading-pos view "w-s4")))
+    (should (= (window-point exp-win) (window-start exp-win)))))
+
+(ert-deftest code-reader-test-a-new-explanation-is-placed-at-the-highlighted-section ()
+  "After a new explanation arrives, the pane shows the highlighted section, not the source's middle."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (code-reader-sync--highlight-active view (code-reader-session-section-by-id view "w-s6"))
+    (setf (code-reader-view-pending-id view) "p-2"
+          (code-reader-view-status view) 'queued)
+    (code-reader-session-handle-event
+     (code-reader-test--result "p-2" code-reader-test--window-sections))
+    (should (= (window-start exp-win) (code-reader-test--heading-pos view "w-s6")))))
+
+(ert-deftest code-reader-test-moving-the-cursor-brings-its-section-into-the-explanation ()
+  "Moving the source cursor to a section out of view scrolls the explanation to that section."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (set-window-start exp-win (code-reader-test--heading-pos view "w-s1") t)
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 150)))
+    (code-reader-sync--run-point view)
+    (should (equal (code-reader-view-active-section-id view) "w-s6"))
+    (should (= (window-start exp-win) (code-reader-test--heading-pos view "w-s6")))))
+
+(ert-deftest code-reader-test-opening-the-reader-shows-no-question-box ()
+  "Opening the reader shows only the explanation; the question box is on screen only while
+the cursor is in it, and reopening does not make a panel."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (should-not (code-reader-chat--window view))
+    (code-reader-ui-open view)
+    (should-not (code-reader-chat--window view))
+    (should (buffer-live-p (code-reader-chat--buffer-of view)))))
 
 (ert-deftest code-reader-test-render-error-shows-code-and-message ()
   "An error event renders the error code, its message and the source lines."
@@ -555,8 +1286,8 @@ Binds `view', `source', `src-win' and `exp-win'."
       (code-reader-session-dispose view)
       (kill-buffer source))))
 
-(ert-deftest code-reader-test-stale-header-and-queued-header ()
-  "The header names the status, including the stale notice with the refresh hint."
+(ert-deftest code-reader-test-header-names-the-status ()
+  "The header names the status and the Claude session."
   (let* ((source (code-reader-test--source-buffer 4))
          (view (code-reader-session-view-for source)))
     (unwind-protect
@@ -565,10 +1296,7 @@ Binds `view', `source', `src-win' and `exp-win'."
                 (code-reader-view-task view) "explain_file"
                 (code-reader-view-claude-session view) "resumed")
           (should (string-match-p "queued" (code-reader-ui-header-string view)))
-          (should (string-match-p "Claude: resumed" (code-reader-ui-header-string view)))
-          (setf (code-reader-view-status view) 'stale)
-          (should (string-match-p "stale — press g to refresh"
-                                  (code-reader-ui-header-string view))))
+          (should (string-match-p "Claude: resumed" (code-reader-ui-header-string view))))
       (code-reader-session-dispose view)
       (kill-buffer source))))
 
@@ -590,7 +1318,7 @@ Binds `view', `source', `src-win' and `exp-win'."
 ;;; Window layout
 
 (ert-deftest code-reader-test-layout-open-and-close-restores-windows ()
-  "Opening makes two panes; closing restores the original window configuration."
+  "Opening shows source, explanation and question box; closing restores the original windows."
   (let* ((source (code-reader-test--source-buffer 5))
          (view (code-reader-session-view-for source)))
     (unwind-protect
@@ -632,6 +1360,13 @@ Binds `view', `source', `src-win' and `exp-win'."
       (set-window-start src-win (code-reader-test--line-pos source 20))
       (code-reader-sync-source-scrolled view)
       (should (= (point) point-before)))))
+
+(ert-deftest code-reader-test-layout-pieces-do-not-look-like-a-scroll ()
+  "Opening the layout (explanation, key guide, question box) records the pane's size, so the
+scroll sync does not read the layout as a scroll."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (should (equal (code-reader-view-synced-exp-size view)
+                   (code-reader-session-window-size exp-win)))))
 
 (ert-deftest code-reader-test-sync-explanation-to-source ()
   "Scrolling the explanation pane scrolls the source to the section's start, without moving point."
@@ -687,19 +1422,44 @@ Scroll events are debounced: a genuine scroll schedules one idle timer."
     (code-reader-sync-jump view "w-s2")
     (should (= (with-current-buffer source (line-number-at-pos (point) t)) 11))
     (should (= (window-point src-win) (with-current-buffer source (point))))
-    (should (cl-some (lambda (ov) (overlay-get ov 'face)) (with-current-buffer source
-                                                           (overlays-in (point-min) (point-max)))))
+    (should (cl-some (lambda (ov) (overlay-get ov 'code-reader)) (with-current-buffer source
+                                                                 (overlays-in (point-min) (point-max)))))
     (should (equal (code-reader-view-sync-target view) "w-s2"))))
 
-(ert-deftest code-reader-test-cursor-sync-highlights-section-at-point ()
-  "Moving point in the source highlights the containing section, without scrolling."
+(ert-deftest code-reader-test-moving-the-cursor-line-by-line-moves-the-explanation-to-its-section ()
+  "Moving the source cursor one line at a time moves the explanation when the cursor enters
+a new section, even when that section is already in view."
   (code-reader-test--with-panes 200 code-reader-test--window-sections
-    (let ((window-start-before (window-start exp-win)))
-      (with-current-buffer source
-        (goto-char (code-reader-test--line-pos source 42)))
-      (code-reader-sync--run-point view)
-      (should (equal (code-reader-view-active-section-id view) "w-s5"))
-      (should (= (window-start exp-win) window-start-before)))))
+    (set-window-start exp-win (code-reader-test--heading-pos view "w-s1") t)
+    ;; Premise: w-s2's heading is already on screen, below w-s1's.
+    (should (code-reader-ui--point-in-window-p (code-reader-test--heading-pos view "w-s2") exp-win))
+    ;; Lines 9 and 10 are in w-s1; line 11 starts w-s2.
+    (dolist (line '(9 10 11))
+      (with-current-buffer source (goto-char (code-reader-test--line-pos source line)))
+      (code-reader-sync--run-point view))
+    (should (equal (code-reader-view-active-section-id view) "w-s2"))
+    (should (= (window-start exp-win) (code-reader-test--heading-pos view "w-s2")))))
+
+(ert-deftest code-reader-test-a-scroll-caused-by-the-cursor-is-left-to-the-cursor-sync ()
+  "When moving the cursor scrolls the source, the cursor's section decides the explanation.
+The middle of the scrolled source is not used, because the cursor sync takes the cursor's section."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (with-current-buffer source
+      (goto-char (code-reader-test--line-pos source 60))
+      (code-reader-sync--post-command))
+    (set-window-start src-win (code-reader-test--line-pos source 50))
+    (code-reader-sync--on-window-scroll src-win 50)
+    (should (timerp (code-reader-view-point-timer view)))
+    (should-not (code-reader-view-scroll-timer view))))
+
+(ert-deftest code-reader-test-cursor-sync-highlights-section-at-point ()
+  "Moving point in the source highlights the containing section, and brings it into view."
+  (code-reader-test--with-panes 200 code-reader-test--window-sections
+    (with-current-buffer source
+      (goto-char (code-reader-test--line-pos source 42)))
+    (code-reader-sync--run-point view)
+    (should (equal (code-reader-view-active-section-id view) "w-s5"))
+    (should (= (window-start exp-win) (code-reader-test--heading-pos view "w-s5")))))
 
 (ert-deftest code-reader-test-explanation-scroll-keeps-cursor-highlight ()
   "Scrolling the explanation moves the source, but the highlight stays on the cursor's section."
@@ -759,7 +1519,28 @@ Scroll events are debounced: a genuine scroll schedules one idle timer."
             ;; file, which is four lines here because the text ends with a newline.
             (let ((section (car (code-reader-view-sections view))))
               (should (equal (plist-get section :start-line) 1))
-              (should (equal (plist-get section :end-line) 4))))
+              (should (equal (plist-get section :end-line) 4)))
+            ;; The explanation is an Org document, and the cache keeps that document.
+            (should (string-match-p "^\\* Lines 1–4" (code-reader-view-document view)))
+            (should (directory-files-recursively (expand-file-name "state/cache/" tmp) "\\.org\\'"))
+            ;; The engine reports the file it stored the explanation in, and it exists.
+            (should (file-exists-p (code-reader-view-cache-path view)))
+            ;; Emacs finds the file the engine wrote, by the names it computes itself.
+            (should (equal (plist-get (code-reader-cache-find view) :key)
+                           (code-reader-view-explanation-key view)))
+            ;; A question is nested under its section, in the document and in the cache file.
+            (let ((chat-id "e2e-chat"))
+              (setq code-reader-chat--pending (list (cons chat-id view)))
+              (code-reader--send (code-reader-chat--request view (car (code-reader-view-sections view))
+                                                            "What does it do?" chat-id))
+              (should (code-reader-test--wait (lambda () (null code-reader-chat--pending)) 120))
+              (should (string-match-p "\\*\\* Question: What does it do\\?" (code-reader-view-document view)))
+              (let ((cached (car (directory-files-recursively (expand-file-name "state/cache/" tmp)
+                                                              "\\.org\\'"))))
+                (should (string-match-p "\\*\\* Question: What does it do\\?"
+                                        (with-temp-buffer
+                                          (insert-file-contents cached)
+                                          (buffer-string)))))))
         (when view
           (code-reader-session-dispose view))
         (when (buffer-live-p buffer)

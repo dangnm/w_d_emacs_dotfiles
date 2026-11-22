@@ -1,18 +1,26 @@
-;;; code-reader-guide.el --- Key guide under the explanation pane -*- lexical-binding: t; -*-
+;;; code-reader-guide.el --- Key guide shown in the bottom panel -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; When the selected window moves from the source pane into the explanation
-;; pane, a small table of the pane's keys appears in a window just below the
-;; explanation.  The table goes away when the cursor moves inside the explanation
-;; pane, or when the selection moves back to the source.  Commands that leave the
-;; cursor where it was, such as mouse movement, do not hide it.  Nothing here
-;; reads or writes explanation text.
+;; The key guide is a table of keys.  It is shown in the bottom panel under the
+;; explanation pane.  The panel is on screen only while the cursor is in it, or
+;; while the key table is up, so the explanation takes the whole column otherwise.
+;; The table appears
+;; when the selection moves from the source pane into the explanation pane.  It
+;; goes away when the cursor moves inside the explanation pane, or when the
+;; selection moves back to the source.  Selecting the panel (for example with
+;; `C-w j') also clears it, so the question box is ready to type in at once.
+;; Commands that leave the cursor where it was, such as mouse movement, do not
+;; hide it.  Nothing here reads or writes explanation text, and no window is
+;; created, deleted or resized: only the panel's buffer changes.
 
 ;;; Code:
 
 (require 'code-reader-transport)
 (require 'code-reader-session)
+(require 'code-reader-chat)
+
+(declare-function code-reader-sync-enter-explanation "code-reader-sync" (view))
 
 (defconst code-reader-guide-buffer-name "*code-reader-guide*"
   "Buffer that holds the key guide.")
@@ -22,19 +30,25 @@
 
 (defconst code-reader-guide-rows
   '((("RET" . "jump to source") . ("g" . "refresh"))
-    (("click" . "jump to source") . ("c" . "cancel"))
-    (("C-w h" . "back to source") . ("t / q" . "hide pane, close")))
+    (("click" . "jump to source") . ("r" . "refresh this section"))
+    (("a" . "ask about this section") . ("c" . "cancel"))
+    (("C-w h" . "back to source") . ("t / q" . "hide pane, close"))
+    (("C-w j" . "to the question box") . ("p" . "copy cache path"))
+    (("d" . "delete the question at point") . nil))
   "Rows of the key guide.
 Each row is (LEFT . RIGHT), and each cell is (KEY . TEXT), or nil for an empty cell.")
 
-(defvar code-reader-guide--window nil
-  "Window showing the key guide, or nil when it is hidden.")
+(defvar code-reader-guide--shown nil
+  "Non-nil while the key table is in the bottom panel.")
 
 (defvar code-reader-guide--last-window nil
   "Window that was selected after the previous command.")
 
 (defvar code-reader-guide--point nil
   "Point of the explanation pane when the key guide appeared.")
+
+(defvar code-reader-guide--view nil
+  "View whose explanation pane the key guide was shown for.")
 
 (defun code-reader-guide--cell-text (cell)
   "Return CELL as plain \"KEY: TEXT\" text, or an empty string."
@@ -69,56 +83,64 @@ Each row is (LEFT . RIGHT), and each cell is (KEY . TEXT), or nil for an empty c
                                   "| " (code-reader-guide--cell (cdr row))))
                         code-reader-guide-rows)))))
 
+(defun code-reader-guide--height ()
+  "Return the number of lines the key table takes."
+  (length (code-reader-guide--lines)))
+
 (defun code-reader-guide--buffer ()
-  "Return the key guide buffer, filled and read-only."
+  "Return the key guide buffer, with its display settings."
   (let ((buffer (get-buffer-create code-reader-guide-buffer-name)))
     (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (mapconcat #'identity (code-reader-guide--lines) "\n") "\n"))
       (setq-local mode-line-format nil
                   header-line-format nil
                   truncate-lines t
                   buffer-read-only t))
     buffer))
 
+(defun code-reader-guide--fill (text)
+  "Replace the key guide buffer's text with TEXT."
+  (with-current-buffer (code-reader-guide--buffer)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert text))))
+
 (defun code-reader-guide-hide ()
-  "Remove the key guide window, if it is shown."
-  (when (window-live-p code-reader-guide--window)
-    (ignore-errors (delete-window code-reader-guide--window)))
-  (setq code-reader-guide--window nil
-        code-reader-guide--point nil))
+  "Clear the key table, and hide the bottom panel unless the cursor is in it."
+  (setq code-reader-guide--shown nil
+        code-reader-guide--point nil
+        code-reader-guide--view nil)
+  (code-reader-chat-release-panel))
 
 (defun code-reader-guide--show (view)
-  "Show the key guide in a window directly below VIEW's explanation pane."
+  "Show the key table in the bottom panel, for VIEW's explanation pane."
   (let ((explanation (get-buffer-window (code-reader-view-explanation-buffer view))))
-    (code-reader-guide-hide)
     (when (window-live-p explanation)
-      (let ((lines (length (code-reader-guide--lines)))
-            (point (window-point explanation)))
-        (setq code-reader-guide--window
-              (condition-case err
-                  (split-window explanation (- lines) 'below)
-                (error
-                 (code-reader--log "key guide: no room below the explanation pane (%s)"
-                                   (error-message-string err))
-                 nil)))
-        (when (window-live-p code-reader-guide--window)
-          (set-window-buffer code-reader-guide--window (code-reader-guide--buffer))
-          (set-window-parameter code-reader-guide--window 'no-other-window t)
-          (set-window-parameter code-reader-guide--window 'no-delete-other-windows t)
-          (setq code-reader-guide--point point))))))
+      (unless (code-reader-chat-panel-window)
+        (code-reader-chat-show view explanation))
+      (when (code-reader-chat-panel-window)
+        (code-reader-guide--fill (concat (mapconcat #'identity (code-reader-guide--lines) "\n") "\n"))
+        (code-reader-chat-panel-show (code-reader-guide--buffer))
+        (setq code-reader-guide--shown t
+              code-reader-guide--point (window-point explanation)
+              code-reader-guide--view view)))))
 
 (defun code-reader-guide--post-command ()
-  "Show the key guide when the cursor enters the explanation pane, and manage it after that.
-The guide stays while the cursor in the explanation pane does not move.  It is
-removed when the cursor moves there, or when the selection leaves the pane."
+  "Manage the key table after each command, in the explanation pane and in the panel.
+The table appears when the cursor enters the explanation pane from the source.
+It stays while the cursor in the explanation pane does not move, and it is
+cleared when the cursor moves there, when the selection leaves the pane, or when
+the panel is selected.  Selecting the panel shows the question box."
   (code-reader--safely "key guide"
     (let ((current (selected-window))
-          (previous code-reader-guide--last-window))
-      ;; The guide window itself can be selected; keep the state as it is then.
-      (unless (eq current code-reader-guide--window)
-        (setq code-reader-guide--last-window current)
+          (previous code-reader-guide--last-window)
+          (panel (code-reader-chat-panel-window)))
+      (setq code-reader-guide--last-window current)
+      (cond
+       ;; The panel is selected: it must show the question box, not the key table.
+       ((and panel (eq current panel))
+        (code-reader-guide-hide)
+        (code-reader-chat-panel-return-to-box))
+       (t
         (let* ((buffer (window-buffer current))
                (view (and code-reader-session--views (code-reader-session-view-of buffer)))
                (in-explanation (and view (eq buffer (code-reader-view-explanation-buffer view)))))
@@ -126,12 +148,16 @@ removed when the cursor moves there, or when the selection leaves the pane."
            ((and in-explanation
                  (window-live-p previous)
                  (eq (window-buffer previous) (code-reader-view-source-buffer view)))
+            ;; The cursor goes to the highlighted section before the key table records
+            ;; where it is.  A click already put the cursor where it was pressed.
+            (unless (mouse-event-p last-command-event)
+              (code-reader-sync-enter-explanation view))
             (code-reader-guide--show view))
            ((and in-explanation
-                 (window-live-p code-reader-guide--window)
+                 code-reader-guide--shown
                  (eql (window-point current) code-reader-guide--point))
             nil)
-           (t (code-reader-guide-hide))))))))
+           (t (code-reader-guide-hide)))))))))
 
 (provide 'code-reader-guide)
 ;;; code-reader-guide.el ends here

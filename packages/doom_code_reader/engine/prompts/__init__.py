@@ -19,12 +19,16 @@ TASK_TEMPLATES: dict[str, str] = {
     "explain_file": "explain_file.md",
     "explain_block": "explain_block.md",
     "explain_function": "explain_function.md",
+    "follow_up": "follow_up.md",
+    "explain_section": "explain_section.md",
 }
 
 TASK_TITLES: dict[str, str] = {
     "explain_file": "Explain file",
     "explain_block": "Explain block",
     "explain_function": "Explain function",
+    "follow_up": "Follow-up question",
+    "explain_section": "Refresh section",
 }
 
 

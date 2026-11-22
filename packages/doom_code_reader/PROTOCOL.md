@@ -58,6 +58,47 @@ Reply: `pong` (see below).
 - `use_cache: false` forces a fresh LLM call (used by "refresh").
 - `timeout` is seconds. The engine clamps it to a sane maximum.
 
+### `explain` with task `follow_up`
+
+Asks one question about one section of a file, and keeps the answer with that section.
+
+- `task`: `"follow_up"`.
+- `question`: required, non-empty, at most 2000 characters. It is trimmed.
+- `target`: `{start_line, end_line}` of the section the question is about. It must lie inside the file.
+- `view`: use an id of its own, for example `"<file>#chat-<id>"`. The engine supersedes an older request with the same view id, so a question must not reuse the explanation's view id.
+- `explanation_key`: required. The `explanation_key` of the `explain` result that the section belongs to. The answer is added to that explanation.
+- `use_cache` is ignored. Each question is a new model call.
+
+The engine runs the question in the same Claude session as the explanation for the same language, so the answer can build on it. The answer comes back as a `result` event with `task: "follow_up"`, carrying `question`, `answer` (non-empty, at most 6000 characters), `target`, `created_at`, `explanation_key`, `cache_path`, `document`, `sections`, `session_id`, `session_resumed`, `cost_usd` and `duration_ms`. `document` is the whole explanation, with the answer nested under its section (see [Explanation documents](#explanation-documents)).
+
+Answers are kept in the explanation's document, under the section they are about. A full explanation (`use_cache` false) keeps the answers for the same lines. If the explanation is no longer cached, or has no section for `target`, the request fails with `explanation_missing`, and no model call is made.
+
+### `explain` with task `explain_section`
+
+Explains one section again, on its own lines, and makes that the section's explanation.
+
+- `task`: `"explain_section"`. `target` is the section's `{start_line, end_line}`, inside the file.
+- `explanation_key`: required, as for a follow-up.
+- `view`: use an id of its own, for example `"<file>#refresh-<id>"`, so the request does not supersede the explanation.
+- `use_cache` is ignored. The call is always made.
+
+The result is a `result` event with `task: "explain_section"`, carrying `explanation` (non-empty, at most 3000 characters), `target`, `created_at`, `explanation_key`, `document`, `sections` and the usual session and cost fields. The engine rewrites the explanation: the section's text is replaced, the questions asked about the section are removed, and the section carries `refreshed_at`. A full explanation (`use_cache` false) replaces that text again.
+
+### `explain` with task `delete_question`
+
+Removes one question from its section, in the explanation and in its file. No model
+call is made.
+
+- `task`: `"delete_question"`. `target` is the question's section `{start_line, end_line}`.
+- `explanation_key`: required, as for a follow-up.
+- `question_at`: required. The question's `created_at` time, which identifies it.
+- `view`: use an id of its own, for example `"<file>#delete-<id>"`.
+
+The result is a `result` event with `task: "delete_question"`, carrying `explanation_key`,
+`question_at`, `cache_path`, `document` and `sections`. If the explanation is not cached,
+or the question is no longer in the section, the request fails with `explanation_missing`,
+and nothing is written.
+
 ### `cancel`
 ```json
 {"type": "cancel", "id": "r-42"}
@@ -127,6 +168,8 @@ streamed model output characters. It is zero before the first token.
   "cache_hit": false,
   "explain_language": "Vietnamese",
   "target": {"start_line": 12, "end_line": 12},
+  "explanation_key": "5e0c…64 hex characters…",
+  "document": "#+TITLE: lisp/foo.el\n#+STARTUP: overview\n…",
   "summary": "Tóm tắt ngắn...",
   "sections": [
     {"id": "9f2c1a0e-s1", "source_start": 12, "source_end": 12,
@@ -156,6 +199,15 @@ streamed model output characters. It is zero before the first token.
 - `session_id`, `cost_usd` may be `null` on cache hits.
 - `session_resumed` is `true` when the Claude call continued an existing session
   (`--resume`), and `false` when it started a new one. It is `null` on cache hits.
+- `document` is the whole explanation as Org-mode text, the form it is cached in. The
+  frontend shows it as it is. See [Explanation documents](#explanation-documents).
+- `cache_path` is the file the explanation is stored in, as an absolute path, or `null`
+  when the explanation has no sections and so is not stored.
+- `explanation_key` is the cache key of that document. Send it back with a follow-up
+  or a section refresh.
+- Each section in `sections` carries `followups`, its questions as
+  `{question, answer, created_at}`, and `refreshed_at`, which is `null` unless the
+  section was refreshed.
 
 ### `error`
 ```json
@@ -172,6 +224,7 @@ streamed model output characters. It is zero before the first token.
 | `claude_timeout`  | the CLI exceeded `timeout`                               | yes       |
 | `claude_failed`   | the CLI exited non-zero or reported `is_error`           | yes       |
 | `invalid_response`| the CLI output did not match the expected schema         | yes       |
+| `explanation_missing` | a follow-up or section refresh names an explanation that is not cached, or a section the explanation does not have | no |
 | `internal`        | unexpected engine bug (details in the engine log)        | no        |
 
 ### `cancelled`
@@ -189,6 +242,29 @@ streamed model output characters. It is zero before the first token.
  "cache_entries": 7}
 {"type": "bye"}
 ```
+
+## Explanation documents
+
+An explanation is one Org-mode document. It is the cache entry on disk, and the
+`document` field of a result. The writer and reader are `engine/org.py`:
+
+- `#+TITLE:` names the file, `#+PROJECT:` the project root, `#+KEY:` the full cache key,
+  and `#+MODEL:` the model the request asked for (`default` when none). The client reads
+  the file in the cache directly, and checks the model before showing it.
+- `* Summary` comes first, then one heading per section in file order:
+  `* Lines A–B · title`. Then `* Dependencies`, `* Data flow`, `* Notes` and
+  `* Warnings`, each present only when it has items.
+- Each heading has a property drawer. A section's drawer has `:KIND: section`,
+  `:SECTION_ID:` and `:LINES: A-B`, plus `:REFRESHED:` after a section refresh.
+- A question is a `** Question: ...` heading under its section, with `:KIND: question`
+  and `:CREATED:`. Its answer is the body.
+- Body text is indented by two spaces, so text from the model cannot start a heading
+  or a drawer.
+
+Files are stored under `cache/<project folder>/<file path in the project>/`, as
+`<scope>-<language>-<8 key chars>.org`, where the scope is `whole-file` or `lines-A-B`.
+A lookup finds the file by its name, then checks the `#+KEY:` line. Entries written in
+earlier layouts (JSON, or hash-named folders) are never read. `clear_cache` removes them.
 
 ## Lifecycle notes for the frontend
 

@@ -16,6 +16,9 @@ ERROR_CODES = (
     "claude_timeout",
     "claude_failed",
     "invalid_response",
+    # A follow-up or section refresh names an explanation that is no longer cached,
+    # or a section that the explanation no longer has.
+    "explanation_missing",
     "internal",
 )
 

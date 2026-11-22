@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 
 from engine import protocol
-from engine.cache import ExplanationCache
+from engine.cache import ExplanationCache, project_folder
 from engine.claude.cli import build_env, run_claude
 from engine.claude.session import SessionStore
 from engine.orchestrator import Orchestrator
@@ -86,6 +86,21 @@ class OrchestratorTests(PipelineCase):
         self.assertEqual(result["file"], "lisp/sample.el")
         self.assertIsNotNone(result["session_id"])
         self.assertEqual(emit.of_type("error"), [])
+
+    async def test_explanation_is_stored_in_its_project_folder(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            emit = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source), emit, "o")
+        result = emit.of_type("result")[0]
+        path = Path(result["cache_path"])
+        self.assertTrue(path.exists())
+        rel = path.relative_to(self.state / "cache")
+        self.assertEqual(rel.parts[0], project_folder(str(self.project)))
+        self.assertEqual(rel.parts[1:3], ("lisp", "sample.el"))
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(f"#+KEY: {result['explanation_key']}", text)
+        self.assertIn("#+MODEL: default", text)
 
     async def test_block_explanation_stays_within_its_target(self) -> None:
         with EnvPatch(fake_env(self.state_file, self.argv_log)):
@@ -388,6 +403,275 @@ class ServerTests(PipelineCase):
         await asyncio.wait_for(self.serve_task, timeout=10)
         self.assertFalse(self.socket_path.exists())
         writer.close()
+
+
+class CacheUntilRefreshTests(PipelineCase):
+    async def test_edited_source_keeps_the_explanation_until_it_is_refreshed(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            first = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="c-1"),
+                                              first, "o")
+            self.assertFalse(first.of_type("result")[0]["cache_hit"])
+
+            # The file was edited: the cached explanation is still served.
+            edited = self.source.read_text(encoding="utf-8") + "\n;; a new comment line\n"
+            again = Collector()
+            await orchestrator.handle_explain(
+                explain_message(self.project, self.source, request_id="c-2", content=edited), again, "o")
+            self.assertTrue(again.of_type("result")[0]["cache_hit"], again.messages)
+            self.assertEqual(len(self._calls()), 1)
+
+            # Refreshing (use_cache false) makes a new call and replaces the entry.
+            refreshed = Collector()
+            await orchestrator.handle_explain(
+                explain_message(self.project, self.source, request_id="c-3", content=edited, use_cache=False),
+                refreshed, "o")
+            self.assertFalse(refreshed.of_type("result")[0]["cache_hit"])
+            self.assertEqual(len(self._calls()), 2)
+
+
+class SectionRefreshPipelineTests(PipelineCase):
+    async def test_refresh_changes_one_section_until_the_explanation_is_regenerated(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            first = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="s-1"),
+                                              first, "o")
+            explained = first.of_type("result")[0]
+            section = explained["sections"][0]
+            lines = (section["source_start"], section["source_end"])
+
+            refresh = Collector()
+            await orchestrator.handle_explain(
+                explain_message(self.project, self.source, task="explain_section", target=lines,
+                                view="view-refresh-1", request_id="s-2", use_cache=False,
+                                explanation_key=explained["explanation_key"]),
+                refresh, "o")
+            self.assertEqual(refresh.of_type("error"), [], refresh.messages)
+            answer = refresh.of_type("result")[0]
+            self.assertEqual(answer["task"], "explain_section")
+            self.assertEqual(answer["target"], {"start_line": lines[0], "end_line": lines[1]})
+            self.assertIn("làm mới", answer["explanation"])
+            self.assertIn("làm mới", answer["document"])
+            self.assertEqual(answer["sections"][0]["explanation"], answer["explanation"])
+
+            # The next explanation of the file shows the refreshed section, from the cache.
+            cached = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="s-3"),
+                                              cached, "o")
+            result = cached.of_type("result")[0]
+            self.assertTrue(result["cache_hit"])
+            self.assertIn("làm mới", result["sections"][0]["explanation"])
+            self.assertEqual(result["document"], answer["document"])
+
+            # A full refresh (use_cache false) supersedes the section refresh.
+            full = Collector()
+            await orchestrator.handle_explain(
+                explain_message(self.project, self.source, request_id="s-4", use_cache=False), full, "o")
+            self.assertNotIn("làm mới", full.of_type("result")[0]["sections"][0]["explanation"])
+
+    async def test_refresh_resets_the_questions_asked_before_it(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            first = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="r-1"),
+                                              first, "o")
+            explained = first.of_type("result")[0]
+            key = explained["explanation_key"]
+            lines = (explained["sections"][0]["source_start"], explained["sections"][0]["source_end"])
+
+            asked = explain_message(self.project, self.source, task="follow_up", target=lines,
+                                    question="Old question?", view="view-old-1", request_id="r-2",
+                                    explanation_key=key)
+            await orchestrator.handle_explain(asked, Collector(), "o")
+
+            refresh = Collector()
+            await orchestrator.handle_explain(
+                explain_message(self.project, self.source, task="explain_section", target=lines,
+                                view="view-refresh-2", request_id="r-3", use_cache=False,
+                                explanation_key=key),
+                refresh, "o")
+            self.assertEqual(refresh.of_type("error"), [], refresh.messages)
+            self.assertEqual(refresh.of_type("result")[0]["sections"][0]["followups"], [])
+            self.assertNotIn("Old question?", refresh.of_type("result")[0]["document"])
+
+            after = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="r-4"),
+                                              after, "o")
+            self.assertEqual(after.of_type("result")[0]["sections"][0]["followups"], [])
+
+            # A question asked after the refresh is shown again.
+            asked_again = explain_message(self.project, self.source, task="follow_up", target=lines,
+                                          question="New question?", view="view-new-1", request_id="r-5",
+                                          explanation_key=key)
+            await orchestrator.handle_explain(asked_again, Collector(), "o")
+            later = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="r-6"),
+                                              later, "o")
+            self.assertEqual([entry["question"] for entry in later.of_type("result")[0]["sections"][0]["followups"]],
+                             ["New question?"])
+
+    async def test_section_refresh_needs_the_explanation_on_disk(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            emit = Collector()
+            await orchestrator.handle_explain(
+                explain_message(self.project, self.source, task="explain_section", target=(1, 7),
+                                view="view-refresh-3", request_id="s-9", use_cache=False,
+                                explanation_key="b" * 64),
+                emit, "o")
+        self.assertEqual(emit.of_type("error")[0]["code"], "explanation_missing")
+        self.assertEqual(self._calls(), [], "no model call when there is nothing to change")
+
+
+class FollowUpPipelineTests(PipelineCase):
+    async def _explain_file(self, orchestrator: Orchestrator) -> dict:
+        emit = Collector()
+        await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="e-0"), emit, "o")
+        return emit.of_type("result")[0]
+
+    async def test_answer_is_nested_under_its_section_and_kept(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain_file(orchestrator)
+            asked = explain_message(self.project, self.source, task="follow_up", target=(1, 7),
+                                    question="Explain more about this section?", view="view-chat-1",
+                                    request_id="f-1", explanation_key=explained["explanation_key"])
+            emit = Collector()
+            await orchestrator.handle_explain(asked, emit, "o")
+            self.assertEqual(emit.of_type("error"), [], emit.messages)
+            answer = emit.of_type("result")[0]
+            self.assertEqual(answer["task"], "follow_up")
+            self.assertEqual(answer["cache_path"], explained["cache_path"])
+            self.assertEqual(answer["question"], "Explain more about this section?")
+            self.assertEqual(answer["target"], {"start_line": 1, "end_line": 7})
+            self.assertIn("giả lập", answer["answer"])
+            self.assertIsNotNone(answer["session_id"])
+            self.assertIn("** Question: Explain more about this section?", answer["document"])
+            self.assertIn("giả lập", answer["document"])
+
+            # The next explanation of the same file is the same document, with the answer in it.
+            emit = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="e-1"),
+                                              emit, "o")
+            self.assertEqual(emit.of_type("error"), [], emit.messages)
+            result = emit.of_type("result")[0]
+            self.assertTrue(result["cache_hit"])
+            self.assertEqual(result["explanation_key"], explained["explanation_key"])
+            self.assertEqual(result["document"], answer["document"])
+            sections = result["sections"]
+            self.assertEqual(len(sections), 1)
+            self.assertEqual([entry["question"] for entry in sections[0]["followups"]],
+                             ["Explain more about this section?"])
+            self.assertIn("giả lập", sections[0]["followups"][0]["answer"])
+
+    async def test_question_about_lines_outside_the_explanation_is_refused(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain_file(orchestrator)
+            calls_before = len(self._calls())
+            asked = explain_message(self.project, self.source, task="follow_up", target=(2, 3),
+                                    question="About lines 2 to 3?", view="view-chat-2", request_id="f-2",
+                                    explanation_key=explained["explanation_key"])
+            emit = Collector()
+            await orchestrator.handle_explain(asked, emit, "o")
+            self.assertEqual(emit.of_type("error")[0]["code"], "explanation_missing")
+            self.assertEqual(len(self._calls()), calls_before, "no model call for a missing section")
+            again = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="e-2"),
+                                              again, "o")
+            self.assertEqual(again.of_type("result")[0]["sections"][0]["followups"], [])
+
+    async def test_question_is_refused_once_the_explanation_was_cleared(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain_file(orchestrator)
+            self.assertEqual(orchestrator.handle_clear_cache()["removed"], 1)
+            calls_before = len(self._calls())
+            asked = explain_message(self.project, self.source, task="follow_up", target=(1, 7),
+                                    question="Still there?", view="view-chat-3", request_id="f-3",
+                                    explanation_key=explained["explanation_key"])
+            emit = Collector()
+            await orchestrator.handle_explain(asked, emit, "o")
+        self.assertEqual(emit.of_type("error")[0]["code"], "explanation_missing")
+        self.assertEqual(len(self._calls()), calls_before)
+
+    async def test_full_refresh_keeps_the_questions_on_the_same_lines(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain_file(orchestrator)
+            asked = explain_message(self.project, self.source, task="follow_up", target=(1, 7),
+                                    question="Kept across a full refresh?", view="view-chat-4", request_id="f-4",
+                                    explanation_key=explained["explanation_key"])
+            await orchestrator.handle_explain(asked, Collector(), "o")
+
+            regenerated = Collector()
+            await orchestrator.handle_explain(
+                explain_message(self.project, self.source, request_id="e-3", use_cache=False), regenerated, "o")
+            result = regenerated.of_type("result")[0]
+            self.assertFalse(result["cache_hit"])
+            self.assertEqual(result["explanation_key"], explained["explanation_key"])
+            self.assertEqual([entry["question"] for entry in result["sections"][0]["followups"]],
+                             ["Kept across a full refresh?"])
+            self.assertIn("** Question: Kept across a full refresh?", result["document"])
+
+
+class DeleteQuestionPipelineTests(PipelineCase):
+    async def _explain_and_ask(self, orchestrator, question: str) -> tuple[dict, dict]:
+        emit = Collector()
+        await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="q-0"), emit, "o")
+        explained = emit.of_type("result")[0]
+        asked = explain_message(self.project, self.source, task="follow_up", target=(1, 7), question=question,
+                                view="view-del-chat", request_id="q-1",
+                                explanation_key=explained["explanation_key"])
+        answer_emit = Collector()
+        await orchestrator.handle_explain(asked, answer_emit, "o")
+        return explained, answer_emit.of_type("result")[0]
+
+    def _delete(self, explained: dict, question_at: str, request_id: str) -> Collector:
+        return explain_message(self.project, self.source, task="delete_question", target=(1, 7),
+                               view="view-del-1", request_id=request_id,
+                               explanation_key=explained["explanation_key"], question_at=question_at)
+
+    async def test_a_question_is_removed_from_the_explanation_and_its_file(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained, answer = await self._explain_and_ask(orchestrator, "A question to delete?")
+            calls_before = len(self._calls())
+            emit = Collector()
+            await orchestrator.handle_explain(self._delete(explained, answer["created_at"], "q-2"), emit, "o")
+        self.assertEqual(emit.of_type("error"), [], emit.messages)
+        result = emit.of_type("result")[0]
+        self.assertEqual(result["task"], "delete_question")
+        self.assertNotIn("A question to delete?", result["document"])
+        self.assertEqual(result["sections"][0]["followups"], [])
+        self.assertEqual(len(self._calls()), calls_before, "deleting a question asks Claude nothing")
+        self.assertNotIn("A question to delete?", Path(result["cache_path"]).read_text(encoding="utf-8"))
+
+    async def test_a_question_that_is_gone_is_reported_and_nothing_is_written(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained, answer = await self._explain_and_ask(orchestrator, "Only once?")
+            first = Collector()
+            await orchestrator.handle_explain(self._delete(explained, answer["created_at"], "q-3"), first, "o")
+            path = Path(first.of_type("result")[0]["cache_path"])
+            after_first = path.read_text(encoding="utf-8")
+            again = Collector()
+            await orchestrator.handle_explain(self._delete(explained, answer["created_at"], "q-4"), again, "o")
+        self.assertEqual(again.of_type("error")[0]["code"], "explanation_missing")
+        self.assertEqual(path.read_text(encoding="utf-8"), after_first)
+
+    async def test_deleting_without_a_saved_explanation_is_refused(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            emit = Collector()
+            request = explain_message(self.project, self.source, task="delete_question", target=(1, 7),
+                                      view="view-del-2", request_id="q-5", explanation_key="d" * 64,
+                                      question_at="2026-11-22T10:00:00.000001+00:00")
+            await orchestrator.handle_explain(request, emit, "o")
+        self.assertEqual(emit.of_type("error")[0]["code"], "explanation_missing")
+        self.assertEqual(self._calls(), [])
 
 
 class SubprocessEngineTests(unittest.TestCase):

@@ -25,9 +25,9 @@
 (defvar code-reader-timeout)
 (defvar code-reader-model)
 
-(declare-function code-reader-ui-render "code-reader-ui" (view))
+(declare-function code-reader-ui-render "code-reader-ui" (view &optional keep-top reveal-id))
 (declare-function code-reader-ui-update-header "code-reader-ui" (view))
-(declare-function code-reader-sync-refresh-view "code-reader-sync" (view))
+(declare-function code-reader-sync-place-view "code-reader-sync" (view))
 
 (cl-defstruct (code-reader-view (:constructor code-reader-view--create) (:copier nil))
   "State shared by a source buffer and its explanation buffer."
@@ -35,7 +35,7 @@
   explanation-buffer
   file                  ; absolute file name of the source buffer
   project-root          ; directory with trailing slash
-  (status 'idle)        ; idle, queued, running, ready, cached, stale or error
+  (status 'idle)        ; idle, queued, running, ready, cached or error
   pending-id            ; request id whose events are still wanted
   task                  ; "explain_file", "explain_block" or "explain_function"
   target                ; plist with :start-marker, :end-marker and :point-marker
@@ -45,13 +45,14 @@
   started-at
   error                 ; plist with :code, :message and :retryable
   last-result           ; the last result event
+  document              ; the explanation as Org text (see engine/org.py)
+  explanation-key       ; cache key of that explanation, sent back with questions and refreshes
+  cache-path            ; the file the explanation is stored in, or nil when it has none
   sections              ; normalized sections, see `code-reader-session--normalize-section'
-  snapshot-hash         ; sha256 of the source text sent with the pending request
-  snapshot-tick         ; `buffer-chars-modified-tick' when the request was made
   claude-session        ; "new", "resumed", "cached" or "unknown"
   note                  ; notice for the user, such as a fallback range
   window-config         ; window configuration to restore on close
-  stale-timer
+  chat-buffer           ; question box under the explanation (see code-reader-chat.el)
   ;; Synchronised scrolling state (see code-reader-sync.el).
   scroll-timer
   scroll-side
@@ -60,6 +61,7 @@
   sync-target           ; id of the section last placed by sync
   synced-source-start   ; window start we last set in the source pane
   synced-exp-start      ; window start we last set in the explanation pane
+  synced-exp-size       ; (WIDTH HEIGHT) of the explanation pane when we last synced it
   active-section-id)
 
 (defvar code-reader-session--views nil
@@ -71,8 +73,6 @@
 (defvar code-reader-session--engine-info nil
   "The last `pong' event received from the engine.")
 
-(defconst code-reader-session-stale-delay 0.5
-  "Idle seconds after an edit before checking whether an explanation is stale.")
 
 ;;; Registry
 
@@ -110,8 +110,7 @@ Signal a user error when BUFFER is not visiting a file."
 
 (defun code-reader-session-dispose (view)
   "Forget VIEW: cancel its timers and request, and kill its explanation buffer."
-  (dolist (timer (list (code-reader-view-stale-timer view)
-                       (code-reader-view-scroll-timer view)
+  (dolist (timer (list (code-reader-view-scroll-timer view)
                        (code-reader-view-point-timer view)))
     (when (timerp timer)
       (cancel-timer timer)))
@@ -120,7 +119,6 @@ Signal a user error when BUFFER is not visiting a file."
     (code-reader--safely "cancel on dispose"
       (code-reader--send (list :type "cancel" :id (code-reader-view-pending-id view)))))
   (setf (code-reader-view-pending-id view) nil
-        (code-reader-view-stale-timer view) nil
         (code-reader-view-scroll-timer view) nil
         (code-reader-view-point-timer view) nil)
   (code-reader-session--release-sections view)
@@ -129,6 +127,10 @@ Signal a user error when BUFFER is not visiting a file."
     (setf (code-reader-view-explanation-buffer view) nil)
     (when (buffer-live-p explanation)
       (kill-buffer explanation)))
+  (let ((chat (code-reader-view-chat-buffer view)))
+    (setf (code-reader-view-chat-buffer view) nil)
+    (when (buffer-live-p chat)
+      (kill-buffer chat)))
   (setq code-reader-session--views (delq view code-reader-session--views)))
 
 ;;; Marker helpers
@@ -188,6 +190,8 @@ LINE is clamped to the accessible buffer.  Uses the current buffer."
               (line-number-at-pos (marker-position end) t))))))
 
 ;;; Request building
+
+(declare-function code-reader-chat-handle-event "code-reader-chat" (event))
 
 (defun code-reader-session--new-id ()
   "Return a request id unique to this Emacs process."
@@ -254,10 +258,7 @@ NOTE, when non-nil, is shown in the header."
             (code-reader-view-output-chars view) 0
             (code-reader-view-started-at view) (float-time)
             (code-reader-view-error view) nil
-            (code-reader-view-note view) note
-            (code-reader-view-snapshot-hash view) (secure-hash 'sha256 (plist-get request :content))
-            (code-reader-view-snapshot-tick view)
-            (with-current-buffer source (buffer-chars-modified-tick)))
+            (code-reader-view-note view) note)
       (when superseded
         (message "Code Reader: superseded the running request"))
       (code-reader-ui-render view)
@@ -325,11 +326,58 @@ Return nil when RAW has no usable line range."
               :start-line start
               :end-line end
               :title (plist-get raw :title)
-              :explanation (plist-get raw :explanation)
               :start-marker (copy-marker (code-reader-session--line-pos start) nil)
               :end-marker (copy-marker (code-reader-session--line-pos end t) t)
               :exp-start nil
               :exp-end nil)))))
+
+(defun code-reader-session-section-for-target (view event)
+  "Return VIEW's section whose lines are the target of EVENT, or nil."
+  (let* ((target (plist-get event :target))
+         (start (plist-get target :start_line))
+         (end (plist-get target :end_line)))
+    (cl-find-if (lambda (section)
+                  (and (equal (plist-get section :start-line) start)
+                       (equal (plist-get section :end-line) end)))
+                (code-reader-view-sections view))))
+
+(defun code-reader-session-apply-result (view event)
+  "Take the explanation and its sections from the result EVENT into VIEW.
+The engine returns the whole explanation as an Org document with every question
+and refreshed section in it, so the pane can be drawn from the document alone.
+The sections give the line ranges that sync and jump use."
+  (let ((sections (code-reader-session--normalize-sections
+                   (plist-get event :sections)
+                   (code-reader-view-source-buffer view))))
+    (code-reader-session--release-sections view)
+    (setf (code-reader-view-sections view) sections
+          (code-reader-view-document view) (plist-get event :document)
+          (code-reader-view-cache-path view) (plist-get event :cache_path)
+          (code-reader-view-explanation-key view)
+          (or (plist-get event :explanation_key) (code-reader-view-explanation-key view)))))
+
+(defun code-reader-session-show-cached (view event)
+  "Show the saved explanation in EVENT for VIEW, without asking the engine.
+The explanation covers the whole file, so the view targets the whole file, as an
+explain_file request would.  No request is pending, so nothing is waiting for it."
+  (let* ((source (code-reader-view-source-buffer view))
+         (lines (code-reader-session-whole-file-lines source)))
+    (code-reader-session--release-target view)
+    (setf (code-reader-view-target view)
+          (code-reader-session--make-target source (car lines) (cdr lines)
+                                            (with-current-buffer source (point))))
+    (setf (code-reader-view-task view) "explain_file"
+          (code-reader-view-pending-id view) nil
+          (code-reader-view-error view) nil
+          (code-reader-view-phase view) nil
+          (code-reader-view-note view) nil
+          (code-reader-view-last-result view) event
+          (code-reader-view-status view) 'cached
+          (code-reader-view-claude-session view) "cached")
+    (code-reader-session-apply-result view event)
+    (code-reader-ui-render view)
+    (when (fboundp 'code-reader-sync-place-view)
+      (code-reader-sync-place-view view))))
 
 (defun code-reader-session--normalize-sections (raw-sections source)
   "Return view sections for RAW-SECTIONS, in order, with markers in SOURCE."
@@ -356,42 +404,35 @@ after edits in the source buffer."
   "Return VIEW's live section whose id is ID, or nil."
   (code-reader-highlight-section-by-id (code-reader-session-live-sections view) id))
 
+;;; Explanation pane state for the scroll sync
+
+(defun code-reader-session-window-size (window)
+  "Return WINDOW's body size as (WIDTH HEIGHT)."
+  (list (window-body-width window) (window-body-height window)))
+
+(defun code-reader-session-note-explanation (view window)
+  "Record WINDOW, the explanation pane, as the state the scroll sync last saw.
+Call this after every window-start change the code makes.  The scroll sync
+then treats a later change as a scroll only when the pane's size is unchanged."
+  (setf (code-reader-view-synced-exp-start view) (window-start window)
+        (code-reader-view-synced-exp-size view) (code-reader-session-window-size window)))
+
+(defun code-reader-session-settle-explanation (view)
+  "Let VIEW's explanation pane settle after the code changed its size.
+Showing or hiding the key guide or the question box resizes the pane, and the
+redisplay that follows can move its window start to keep point visible.  That
+is a layout effect, not a scroll.  So redisplay now and record the result: the
+scroll sync then sees nothing to follow."
+  (let* ((buffer (code-reader-view-explanation-buffer view))
+         (window (and (buffer-live-p buffer) (get-buffer-window buffer))))
+    (when (window-live-p window)
+      (redisplay t)
+      (code-reader-session-note-explanation view window))))
+
 ;;; Staleness
-
-(defun code-reader-session-check-stale (view)
-  "Mark VIEW stale when its source text no longer matches the explained text.
-The modification tick is compared first; the hash is computed only when the
-tick has moved on."
-  (let ((source (code-reader-view-source-buffer view)))
-    (when (and (buffer-live-p source)
-               (memq (code-reader-view-status view) '(ready cached))
-               (code-reader-view-snapshot-hash view)
-               (/= (with-current-buffer source (buffer-chars-modified-tick))
-                   (or (code-reader-view-snapshot-tick view) -1)))
-      (if (equal (secure-hash 'sha256 (code-reader-session--buffer-text source))
-                 (code-reader-view-snapshot-hash view))
-          (setf (code-reader-view-snapshot-tick view)
-                (with-current-buffer source (buffer-chars-modified-tick)))
-        (setf (code-reader-view-status view) 'stale)
-        (code-reader-ui-update-header view)))))
-
-(defun code-reader-session--stale-timer-fired (view)
-  "Idle callback that runs the staleness check for VIEW."
-  (setf (code-reader-view-stale-timer view) nil)
-  (code-reader--safely "stale check"
-    (code-reader-session-check-stale view)))
-
-(defun code-reader-session--after-change (_beg _end _length)
-  "Global `after-change-functions' hook: schedule a stale check after an edit."
-  (when code-reader-session--views
-    (let ((view (code-reader-session-view-of (current-buffer))))
-      (when (and view
-                 (eq (current-buffer) (code-reader-view-source-buffer view))
-                 (memq (code-reader-view-status view) '(ready cached))
-                 (not (code-reader-view-stale-timer view)))
-        (setf (code-reader-view-stale-timer view)
-              (run-with-idle-timer code-reader-session-stale-delay nil
-                                   #'code-reader-session--stale-timer-fired view))))))
+;;
+;; An explanation never expires on its own.  Editing the source leaves it in
+;; place, and only `g' (a refresh) replaces it.
 
 (defun code-reader-session--on-kill-buffer ()
   "Global `kill-buffer-hook': dispose a view when its source buffer dies."
@@ -402,7 +443,6 @@ tick has moved on."
             (code-reader-session-dispose view)
           (setf (code-reader-view-explanation-buffer view) nil))))))
 
-(add-hook 'after-change-functions #'code-reader-session--after-change)
 (add-hook 'kill-buffer-hook #'code-reader-session--on-kill-buffer)
 
 ;;; Engine events
@@ -442,28 +482,23 @@ Claude session.  It is null on cache hits, which is checked first."
         (code-reader-ui-update-header view)))))
 
 (defun code-reader-session--on-result (event)
-  "Handle a `result' EVENT: store the sections and show the explanation."
+  "Handle a `result' EVENT: take the explanation and show it."
   (let ((view (code-reader-session--view-for-id (plist-get event :id))))
     (if (null view)
         (code-reader--log "ignored result %s: no view waits for it"
                           (plist-get event :id))
-      (let ((sections (code-reader-session--normalize-sections
-                       (plist-get event :sections)
-                       (code-reader-view-source-buffer view))))
-        (code-reader-session--release-sections view)
-        (setf (code-reader-view-sections view) sections
-              (code-reader-view-last-result view) event
-              (code-reader-view-pending-id view) nil
-              (code-reader-view-error view) nil
-              (code-reader-view-phase view) nil
-              (code-reader-view-status view)
-              (if (eq (plist-get event :cache_hit) t) 'cached 'ready)
-              (code-reader-view-claude-session view)
-              (code-reader-session--claude-label event))
-        (code-reader-session-check-stale view)
-        (code-reader-ui-render view)
-        (when (fboundp 'code-reader-sync-refresh-view)
-          (code-reader-sync-refresh-view view))))))
+      (code-reader-session-apply-result view event)
+      (setf (code-reader-view-last-result view) event
+            (code-reader-view-pending-id view) nil
+            (code-reader-view-error view) nil
+            (code-reader-view-phase view) nil
+            (code-reader-view-status view)
+            (if (eq (plist-get event :cache_hit) t) 'cached 'ready)
+            (code-reader-view-claude-session view)
+            (code-reader-session--claude-label event))
+      (code-reader-ui-render view)
+      (when (fboundp 'code-reader-sync-place-view)
+        (code-reader-sync-place-view view)))))
 
 (defun code-reader-session--on-error (event)
   "Handle an `error' EVENT.  Errors without an id are only logged."
@@ -520,8 +555,152 @@ Claude session.  It is null on cache hits, which is checked first."
         (insert (pp-to-string event))))
     (display-buffer buffer)))
 
+;;; Section refresh
+
+(defvar code-reader-session--section-requests nil
+  "Alist of (REQUEST-ID . VIEW) for section refreshes the engine has not answered yet.")
+
+(defun code-reader-session--section-request (view section id)
+  "Return the explain_section request that explains SECTION of VIEW again.
+The request has a view id of its own, so it never supersedes the explanation,
+and it names the explanation that it changes."
+  (unless (code-reader-view-explanation-key view)
+    (user-error "Code Reader: there is no explanation to change yet"))
+  (let ((request (with-current-buffer (code-reader-view-source-buffer view)
+                   (code-reader-session-build-request
+                    :id id :task "explain_section"
+                    :start-line (plist-get section :start-line)
+                    :end-line (plist-get section :end-line)
+                    :use-cache nil))))
+    (plist-put request :explanation_key (code-reader-view-explanation-key view))
+    (plist-put request :view (format "%s#refresh-%s" (code-reader-view-file view) id))))
+
+(defun code-reader-session-refresh-section (view)
+  "Explain the highlighted section of VIEW again.  The rest of the explanation stays."
+  (let* ((section-id (code-reader-view-active-section-id view))
+         (section (and section-id (code-reader-session-section-by-id view section-id))))
+    (unless section
+      (user-error "Code Reader: no section is highlighted; move the cursor in the source"))
+    (let* ((id (code-reader-session--new-id))
+           (request (code-reader-session--section-request view section id)))
+      (push (cons id view) code-reader-session--section-requests)
+      (message "Code Reader: refreshing lines %d–%d"
+               (plist-get section :start-line) (plist-get section :end-line))
+      (code-reader-transport-connect
+       (lambda (error-message)
+         (if error-message
+             (code-reader-session--section-failed id error-message)
+           (condition-case err
+               (code-reader--send request)
+             (error (code-reader-session--section-failed id (error-message-string err))))))))))
+
+(defun code-reader-session--forget-section (id)
+  "Stop waiting for the section refresh ID."
+  (setq code-reader-session--section-requests
+        (cl-remove id code-reader-session--section-requests :key #'car :test #'equal)))
+
+(defun code-reader-session--section-failed (id message)
+  "Report that the section refresh ID could not run, because of MESSAGE."
+  (when (assoc id code-reader-session--section-requests)
+    (code-reader-session--forget-section id)
+    (message "Code Reader: could not refresh the section: %s" message)))
+
+(defun code-reader-session--on-section-refreshed (view event)
+  "Show the refreshed section in EVENT, which replaces its text and drops its questions.
+The engine has already done that in the document it sends back, so the whole
+document is taken and drawn again."
+  (let ((explanation (plist-get event :explanation)))
+    (if (not (stringp explanation))
+        (message "Code Reader: the refreshed section had no explanation")
+      (code-reader-session-apply-result view event)
+      (let ((section (code-reader-session-section-for-target view event)))
+        (if (null section)
+            (message "Code Reader: that section is no longer in the explanation")
+          (code-reader-ui-render view t)
+          (message "Code Reader: refreshed lines %d–%d"
+                   (plist-get section :start-line) (plist-get section :end-line)))))))
+
+(defun code-reader-session--section-event (event)
+  "Handle EVENT if it answers a section refresh.  Return non-nil when it did."
+  (let* ((id (plist-get event :id))
+         (entry (and (stringp id) (assoc id code-reader-session--section-requests))))
+    (when entry
+      (let ((view (cdr entry))
+            (type (plist-get event :type)))
+        (cond
+         ((equal type "result")
+          (code-reader-session--forget-section id)
+          (code-reader-session--on-section-refreshed view event))
+         ((member type '("error" "cancelled"))
+          (code-reader-session--forget-section id)
+          (message "Code Reader: could not refresh the section: %s"
+                   (or (plist-get event :message) (plist-get event :code) type))))
+        t))))
+
+;;; Deleting a question
+
+(defvar code-reader-session--delete-requests nil
+  "Alist of (REQUEST-ID . VIEW) for question deletions the engine has not answered yet.")
+
+(defun code-reader-session-delete-question (view section created)
+  "Delete the question CREATED, under SECTION of VIEW, from the explanation and its file.
+The engine does the deleting, and the view takes the explanation it sends back."
+  (unless (code-reader-view-explanation-key view)
+    (user-error "Code Reader: there is no explanation to change yet"))
+  (let* ((id (code-reader-session--new-id))
+         (request (with-current-buffer (code-reader-view-source-buffer view)
+                    (code-reader-session-build-request
+                     :id id :task "delete_question"
+                     :start-line (plist-get section :start-line)
+                     :end-line (plist-get section :end-line)
+                     :use-cache nil))))
+    (setq request (plist-put request :explanation_key (code-reader-view-explanation-key view)))
+    (setq request (plist-put request :question_at created))
+    (setq request (plist-put request :view (format "%s#delete-%s" (code-reader-view-file view) id)))
+    (push (cons id view) code-reader-session--delete-requests)
+    (message "Code Reader: deleting the question")
+    (code-reader-transport-connect
+     (lambda (error-message)
+       (if error-message
+           (code-reader-session--delete-failed id error-message)
+         (condition-case err
+             (code-reader--send request)
+           (error (code-reader-session--delete-failed id (error-message-string err)))))))))
+
+(defun code-reader-session--delete-failed (id message)
+  "Report that the question deletion ID could not run, because of MESSAGE."
+  (when (assoc id code-reader-session--delete-requests)
+    (setq code-reader-session--delete-requests
+          (cl-remove id code-reader-session--delete-requests :key #'car :test #'equal))
+    (message "Code Reader: could not delete the question: %s" message)))
+
+(defun code-reader-session--delete-event (event)
+  "Handle EVENT if it answers a question deletion.  Return non-nil when it did."
+  (let* ((id (plist-get event :id))
+         (entry (and (stringp id) (assoc id code-reader-session--delete-requests))))
+    (when entry
+      (let ((view (cdr entry))
+            (type (plist-get event :type)))
+        (setq code-reader-session--delete-requests
+              (cl-remove id code-reader-session--delete-requests :key #'car :test #'equal))
+        (if (equal type "result")
+            (progn
+              (code-reader-session-apply-result view event)
+              (code-reader-ui-render view t)
+              (message "Code Reader: question deleted"))
+          (message "Code Reader: could not delete the question: %s"
+                   (or (plist-get event :message) (plist-get event :code) type)))
+        t))))
+
 (defun code-reader-session-handle-event (event)
-  "Dispatch one engine EVENT, a plist whose `:type' names the message kind."
+  "Dispatch one engine EVENT: a question, a section refresh, a deletion, or an explanation event."
+  (unless (or (code-reader-chat-handle-event event)
+              (code-reader-session--section-event event)
+              (code-reader-session--delete-event event))
+    (code-reader-session--dispatch event)))
+
+(defun code-reader-session--dispatch (event)
+  "Dispatch an explanation EVENT by its `:type'."
   (pcase (plist-get event :type)
     ("progress" (code-reader-session--on-progress event))
     ("result" (code-reader-session--on-result event))
