@@ -337,6 +337,28 @@ class PromptTests(unittest.TestCase):
         self.assertIn("     2| body", prompt)
         self.assertNotIn("{{", prompt)
 
+    def test_detail_prompt_asks_why_each_line_exists_and_what_breaks_without_it(self) -> None:
+        values = {
+            "target_start": "5", "target_end": "6", "file": "lisp/sample.el", "language": "emacs-lisp",
+            "project_root": "/p", "window_start": "1", "window_end": "9", "total_lines": "9",
+            "truncated_note": "", "snippet": "     5| (setq x 1)", "section_explanation": "Sets up the state.",
+        }
+        prompt = build_user_prompt("explain_detail", values)
+        self.assertIn("Sets up the state.", prompt)  # the group's explanation is context for the model
+        self.assertIn('starts with "Without it,"', prompt)
+        self.assertIn("exactly two plain sentences", prompt)
+        self.assertIn("Search the project for each of those names", prompt)  # other files show the decision
+        self.assertIn("The first sentence gives the decision", prompt)
+        self.assertNotIn("{{", prompt)
+
+    def test_detail_prompt_requires_the_section_explanation_value(self) -> None:
+        values = {
+            "target_start": "5", "target_end": "6", "file": "f", "language": "l", "project_root": "/p",
+            "window_start": "1", "window_end": "9", "total_lines": "9", "truncated_note": "", "snippet": "",
+        }
+        with self.assertRaises(PromptError):
+            build_user_prompt("explain_detail", values)
+
     def test_fingerprint_depends_on_task(self) -> None:
         self.assertNotEqual(prompt_fingerprint("explain_file"), prompt_fingerprint("explain_function"))
 

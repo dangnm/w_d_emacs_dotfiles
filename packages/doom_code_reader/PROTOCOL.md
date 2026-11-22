@@ -119,6 +119,8 @@ Adds a line-by-line explanation to every lines group of an explanation.
 - `view`: use an id of its own, for example `"<file>#detail-<id>"`, so the request does not supersede the explanation.
 - `use_cache` is ignored. The calls are always made.
 
+Each entry is an explanation of exactly two sentences: the decision behind the line, then what would happen without it. Each call also gets the lines group's saved explanation as context. The model may read and search other files in the project (Read, Grep, Glob) to find the reason a line is there.
+
 Each lines group is cut into pieces of at most 40 lines, and each piece is one model call. Three calls run at a time, and each starts a new Claude session, so none of them adds to the session that answers questions. If one piece fails, the request fails and nothing is stored.
 
 The result is a `result` event with `task: "explain_detail"`, carrying `explanation_key`, `cache_path`, `document` and `sections`, where each section has its `detail`. Every group of the file gets a new detail. Questions and the rest of the explanation are kept. `cost_usd` is the total of the calls, or `null`. If the explanation is not cached, the request fails with `explanation_missing` and no model call is made. An answer without a `lines` list fails with `invalid_response`.
