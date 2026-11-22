@@ -20,43 +20,49 @@
 - [[#key-bindings][Key bindings]]
   - [[#commons-bindings][Commons bindings]]
   - [[#other-custom-bindings][Other custom bindings]]
+  - [[#toggles][Toggles]]
   - [[#file-bindings][File bindings]]
-  - [[#search-bindings][Search bindings]]
   - [[#windows-binding][Windows binding]]
   - [[#jump-binding][Jump binding]]
   - [[#register-binding][Register binding]]
   - [[#git-binding][Git binding]]
   - [[#layouts][Layouts]]
-  - [[#m-x-command][M-x command]]
   - [[#clipboard-bindings][Clipboard bindings]]
   - [[#dired-secondary-leader-key][Dired secondary leader key]]
 - [[#my-search-config][My search config]]
+  - [[#vertico-config-search-files-search-texts][Vertico config (search files, search texts)]]
   - [[#ivy-config][Ivy config]]
   - [[#helm-config][Helm config]]
   - [[#fzf-search-config][Fzf search config]]
 - [[#my-git-tools-config][My git tools config]]
   - [[#magit-config][Magit config]]
 - [[#other-tools-configs][Other tools configs]]
+  - [[#flycheck][Flycheck]]
   - [[#workspace-persp-mode-config][Workspace (PERSP MODE) config]]
   - [[#shell-config][Shell config]]
+  - [[#code-reader-config][Code reader config]]
 - [[#tips][Tips]]
+  - [[#emacs][Emacs]]
   - [[#check-all-bindings][Check all bindings]]
   - [[#org-mode-basic-bindings][Org mode basic bindings]]
 #+END_QUOTE
 
 * Installation
 ** Install Doom Emacs
-Click [[https://github.com/hlissner/doom-emacs#install][here]] to install Doom Emacs if it's not ready in the target environment
+- Run ~rm -rf ~/.emacs.d~ because Doom 3.0 has moved configs from ~/.emacs.d to ~/.config/emacs
+- Run ~mkdir ~/.doom.d~ to force Doom 3.0 to generate init.el in doom.d
+- Click [[https://github.com/hlissner/doom-emacs#install][here]] to install Doom Emacs if it's not ready in the target environment
 ** Clone this repo into home folder
 Run ~git clone git@github.com:dangnm/w_d_emacs_dotfiles.git ~/w_d_emacs_dotfiles~
 ** Setup Emacs dotfiles
-ln -sf ~/w_d_emacs_dotfiles/config.org ~/.doom.d/config.org
+ln -sf ~/w_d_emacs_dotfiles/doom_3_0_0_pre_config.org ~/.doom.d/config.org
 ** Enable org file config
 - Go to ~/.doom.d/init.el
 - Uncomment ~literate~ in init.el
 ** Rebuild config
 - Run ~SPC h r r~ OR ~M-x doom/reload~ to re-apply configurations from config.org
 - Run ~doom env~ to re-apply env vars for Doom Emacs
+- Or run ~/.config/emacs/bin/doom sync
 * Helpers
 ** Basic helpers
    #+BEGIN_SRC emacs-lisp
@@ -348,6 +354,11 @@ iTerm2 -> Preferences -> Selection -> [check] Applications in terminal may acces
 (map! :leader :desc "Togle selective display" "h,zc" #'toggle-selective-display)
 #+END_SRC
 
+** Toggles
+#+BEGIN_SRC emacs-lisp
+(map! :leader :desc "Toggle test & implementation" "t,t" #'projectile-toggle-between-implementation-and-test)
+#+END_SRC
+
 ** File bindings
 #+BEGIN_SRC emacs-lisp
 (map! :leader :desc "Custom" "f," nil)
@@ -358,11 +369,6 @@ iTerm2 -> Preferences -> Selection -> [check] Applications in terminal may acces
 (map! :leader :desc "copy file name base" "f,yN" #'w/show-buffer-file-name-base)
 (map! :leader :desc "copy file path with line" "f,yl" #'w/show-buffer-file-path-with-line)
 (map! :leader :desc "copy projectile file path with line" "f,yL" #'w/projectile-copy-file-path-with-line)
-#+END_SRC
-
-** Search bindings
-#+BEGIN_SRC emacs-lisp
-(map! :leader :desc "szf" "szf" #'counsel-fzf)
 #+END_SRC
 
 ** Windows binding
@@ -403,11 +409,6 @@ iTerm2 -> Preferences -> Selection -> [check] Applications in terminal may acces
 (map! :leader :desc "Persp select" "l" #'w/persp-hydra/body)
 #+END_SRC
 
-** M-x command
-#+BEGIN_SRC emacs-lisp
-(map! :leader :desc "M-x command" "SPC" #'counsel-M-x)
-#+END_SRC
-
 ** Clipboard bindings
 The compatibility of system clipboard
 #+BEGIN_SRC emacs-lisp
@@ -427,6 +428,7 @@ The compatibility of system clipboard
 
 ** Dired secondary leader key
 #+BEGIN_SRC emacs-lisp
+       (require 'shell)
        (general-define-key
         :states '(normal visual insert emacs)
         :prefix w/secondary-leader-key
@@ -499,6 +501,29 @@ The compatibility of system clipboard
 #+END_SRC
 
 * My search config
+** Vertico config (search files, search texts)
+#+BEGIN_SRC emacs-lisp
+  (use-package vertico
+    :init
+    (setq completion-in-region-function
+          (lambda (&rest args)
+            (apply (if vertico-mode
+                       #'consult-completion-in-region
+                     #'completion--in-region)
+                   args)))
+    (vertico-mode)
+    (setq vertico-cycle t)
+    :bind (:map vertico-map
+                ("C-j" . vertico-next)
+                ("C-k" . vertico-previous)
+                ("C-d" . vertico-scroll-down)
+                ("C-u" . vertico-scroll-up) ())
+    :config
+    (setq completion-styles '(substring orderless)
+          read-file-name-completion-ignore-case t
+          read-buffer-completion-ignore-case t))
+#+END_SRC
+
 ** Ivy config
 #+BEGIN_SRC emacs-lisp
 (map! (:after ivy :map ivy-minibuffer-map
@@ -580,12 +605,13 @@ The compatibility of system clipboard
    #+END_SRC
 
 * My git tools config
-** Magit config
+** Magit config :QUOTE:
 #+BEGIN_SRC emacs-lisp
-     (use-package hydra
-       :ensure t
-       :defer t
-       )
+     (setq lv-hydra-path (format "%s/packages/hydra/lv.el" w-dotfiles-folder-path))
+     (setq hydra-path (format "%s/packages/hydra/hydra.el" w-dotfiles-folder-path))
+     (load! lv-hydra-path)
+     (load! hydra-path)
+
 
      (use-package git-timemachine
        :commands (git-timemachine)
@@ -638,7 +664,7 @@ The compatibility of system clipboard
        :ensure t
        :commands (diff-hl-mode)
        :config
-       (diff-hl-margin-mode)
+       (diff-hl-mode)
        (setq diff-hl-margin-side 'right)
        )
                                              ;Init git modified highlighting at programming mode
@@ -663,6 +689,13 @@ The compatibility of system clipboard
 #+END_SRC
 
 * Other tools configs
+** Flycheck
+#+BEGIN_SRC emacs-lisp
+(add-hook 'ruby-mode-hook
+          (lambda ()
+            (setq-local flycheck-command-wrapper-function
+                        (lambda (command) (append '("bundle" "exec") command)))))
+#+END_SRC
 ** Workspace (PERSP MODE) config
 save/recover sessions
 #+BEGIN_SRC emacs-lisp
@@ -707,7 +740,7 @@ save/recover sessions
              persp-add-buffer-on-after-change-major-mode t
              persp-auto-resume-time -1
              persp-autokill-buffer-on-remove 'kill-weak
-             persp-save-dir (expand-file-name "~/.emacs.d/.cache/layouts/"))
+             persp-save-dir (expand-file-name "layouts/" doom-cache-dir))
        )
 
      (defun w/persp-layout ()
@@ -824,9 +857,73 @@ Otherwise move to the end of the buffer."
       )))
 
 #+END_SRC
+** TypeScript/TSX config
+#+BEGIN_SRC emacs-lisp
+;; Add asdf shims to exec-path so Emacs can find tsserver
+(add-to-list 'exec-path (expand-file-name "~/.asdf/shims"))
+(setenv "PATH" (concat (expand-file-name "~/.asdf/shims") ":" (getenv "PATH")))
+;; .tsx files: rjsx-mode (installed via Doom javascript module)
+(add-to-list 'auto-mode-alist '("\\.tsx\\'" . rjsx-mode))
+;; .ts files: typescript-mode
+(add-to-list 'auto-mode-alist '("\\.ts\\'" . typescript-mode))
+#+END_SRC
+** Agent shell config
+Packages must be declared in ~~/.doom.d/packages.el~. Add these 3 lines then run ~doom sync~ from terminal:
+#+BEGIN_SRC emacs-lisp :tangle no
+(package! shell-maker :recipe (:host github :repo "xenodium/shell-maker"))
+(package! acp         :recipe (:host github :repo "xenodium/acp.el"))
+(package! agent-shell :recipe (:host github :repo "xenodium/agent-shell"))
+#+END_SRC
+Make sure ~ANTHROPIC_API_KEY~ is exported in your shell and run ~doom env~.
+#+BEGIN_SRC emacs-lisp
+;; Add asdf nodejs bin dynamically so Emacs can find claude-agent-acp
+(when (executable-find "asdf")
+  (let ((nodejs-bin (string-trim (shell-command-to-string "asdf where nodejs 2>/dev/null"))))
+    (unless (string-empty-p nodejs-bin)
+      (let ((bin-path (concat nodejs-bin "/bin")))
+        (add-to-list 'exec-path bin-path)
+        (setenv "PATH" (concat bin-path ":" (getenv "PATH")))))))
+
+;; agent-shell requires Emacs 29+ (uses defvar-keymap)
+(when (and (>= emacs-major-version 29)
+           (locate-library "agent-shell"))
+  (autoload 'agent-shell "agent-shell" "Launch an LLM agent shell." t)
+
+  (with-eval-after-load 'agent-shell
+    (when (getenv "ANTHROPIC_API_KEY")
+      (setq agent-shell-anthropic-claude-environment
+            (agent-shell-make-environment-variables
+             "ANTHROPIC_API_KEY" (getenv "ANTHROPIC_API_KEY"))))
+    (setq agent-shell-inherit-environment t))
+
+  ;; SPC t a → agent-shell  |  C-u M-x agent-shell → new session
+  (map! :leader :desc "Agent shell" "t a" #'agent-shell))
+#+END_SRC
+** Code reader config
+Two-pane code reader: source on the left, AI explanations (Vietnamese) on the right. The engine lives in ~packages/doom_code_reader~ and calls the Claude Code CLI in read-only mode. See that folder's README for setup.
+- ~SPC c r~ open the reader and explain the whole file (scroll the source to find the part you need)
+- ~SPC c b~ explain the selected region, ~SPC c F~ explain the current function
+- In the explanation pane: ~RET~ jump to the source, ~g~ refresh, ~c~ cancel, ~t~ toggle pane, ~q~ close
+
+~SPC c e~ and ~SPC c f~ keep Doom's bindings (evaluate buffer, format), so the reader uses the keys above.
+#+BEGIN_SRC emacs-lisp
+(setq code-reader-path (format "%s/packages/doom_code_reader/doom/code-reader" w-dotfiles-folder-path))
+(add-to-list 'load-path code-reader-path)
+(dolist (command '(code-reader-open code-reader-explain-file code-reader-explain-block
+                   code-reader-explain-function code-reader-cancel code-reader-refresh
+                   code-reader-toggle-panel code-reader-close code-reader-clear-cache
+                   code-reader-reset-session code-reader-show-status code-reader-set-language
+                   code-reader-shutdown-engine))
+  (autoload command "code-reader" nil t))
+(map! :leader :desc "Code reader" "c r" #'code-reader-open)
+(map! :leader :desc "Explain block" "c b" #'code-reader-explain-block)
+(map! :leader :desc "Explain function" "c F" #'code-reader-explain-function)
+#+END_SRC
 * Tips
+** Emacs
+- User ~Ctrl Z~ or ~evil-emacs-state~ to toggle Emacs mode & Vi mode
 ** Check all bindings
-SPC h b b runs counsel-descbinds and will show all defined keys and their definitions.
+SPC h b b  will show all defined keys and their definitions.
 ** Org mode basic bindings
 - Use ~Shift Tab~ to fold or unfold all headlines
 - Use ~zc~ or ~zo~ on headlines to fold or unfold headlines
