@@ -841,6 +841,102 @@ class DetailPipelineTests(PipelineCase):
             self.assertEqual(changed.of_type("result")[0]["sections"][0]["detail"], [])
             self.assertNotIn("Detail explanation", changed.of_type("result")[0]["document"])
 
+    async def _line_question(self, orchestrator, explained: dict, *, line: int, question: str,
+                             target=(1, 7), request_id="lq-1", content=None) -> Collector:
+        emit = Collector()
+        request = explain_message(self.project, self.source, task="follow_up_line", request_id=request_id,
+                                  view=f"view-{request_id}", explanation_key=explained["explanation_key"],
+                                  target=target, question=question, line=line, content=content)
+        await orchestrator.handle_explain(request, emit, "o")
+        return emit
+
+    async def test_a_question_about_a_line_is_nested_under_that_line(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            await self._detail(orchestrator, explained)
+            emit = await self._line_question(orchestrator, explained, line=1, question="Why line one?")
+        self.assertEqual(emit.of_type("error"), [], emit.messages)
+        result = emit.of_type("result")[0]
+        self.assertEqual(result["task"], "follow_up_line")
+        document = result["document"]
+        self.assertIn("    Question about line 1 (asked ", document)
+        self.assertIn("): Why line one?\n", document)
+        self.assertLess(document.index("  - 1\n"), document.index("Question about line 1 (asked"))
+        self.assertLess(document.index("Question about line 1 (asked"), document.index("  - 2\n"))
+        self.assertEqual([(entry["question"], entry["line"]) for entry in result["sections"][0]["followups"]],
+                         [("Why line one?", 1)])
+        self.assertEqual(Path(result["cache_path"]).read_text(encoding="utf-8"), document)
+
+    async def test_a_question_about_a_line_without_code_is_refused_before_any_call(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            calls_before = len(self._calls())
+            emit = await self._line_question(orchestrator, explained, line=4, question="Why blank?")
+        self.assertEqual(emit.of_type("error")[0]["code"], "bad_request")
+        self.assertEqual(len(self._calls()), calls_before)
+
+    async def test_a_question_about_a_line_outside_its_section_is_refused(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            emit = await self._line_question(orchestrator, explained, line=5, question="Why?", target=(1, 3))
+        self.assertEqual(emit.of_type("error")[0]["code"], "bad_request")
+
+    async def test_a_full_refresh_keeps_a_line_question_while_its_line_is_unchanged(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            await self._detail(orchestrator, explained)
+            await self._line_question(orchestrator, explained, line=1, question="Why line one?")
+            # Line 6 changes, so the detail goes, but line 1 is the same, so its question stays.
+            edited = self.source.read_text(encoding="utf-8").replace("(+ a b)", "(+ a b 0)")
+            changed = Collector()
+            await orchestrator.handle_explain(explain_message(self.project, self.source, request_id="lq-r1",
+                                                              content=edited, use_cache=False), changed, "o")
+        result = changed.of_type("result")[0]
+        self.assertEqual(result["sections"][0]["detail"], [])
+        self.assertEqual([(entry["question"], entry["line"]) for entry in result["sections"][0]["followups"]],
+                         [("Why line one?", 1)])
+        self.assertIn("Question about line 1 (asked ", result["document"])
+        self.assertIn("): Why line one?", result["document"])
+
+    async def test_refreshing_a_section_removes_its_line_questions(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            await self._detail(orchestrator, explained)
+            await self._line_question(orchestrator, explained, line=1, question="Why line one?")
+            refresh = Collector()
+            await orchestrator.handle_explain(
+                explain_message(self.project, self.source, task="explain_section", target=(1, 7),
+                                view="view-lq-refresh", request_id="lq-s1", use_cache=False,
+                                explanation_key=explained["explanation_key"]),
+                refresh, "o")
+        self.assertEqual(refresh.of_type("error"), [], refresh.messages)
+        self.assertEqual(refresh.of_type("result")[0]["sections"][0]["followups"], [])
+        self.assertNotIn("Why line one?", refresh.of_type("result")[0]["document"])
+
+    async def test_deleting_a_question_about_a_line_removes_it(self) -> None:
+        with EnvPatch(fake_env(self.state_file, self.argv_log)):
+            orchestrator, _ = self._orchestrator()
+            explained = await self._explain(orchestrator)
+            await self._detail(orchestrator, explained)
+            asked = (await self._line_question(orchestrator, explained, line=1,
+                                               question="Why line one?")).of_type("result")[0]
+            emit = Collector()
+            await orchestrator.handle_explain(
+                explain_message(self.project, self.source, task="delete_question", target=(1, 7),
+                                view="view-lq-del", request_id="lq-d1",
+                                explanation_key=explained["explanation_key"], question_at=asked["created_at"]),
+                emit, "o")
+        self.assertEqual(emit.of_type("error"), [], emit.messages)
+        result = emit.of_type("result")[0]
+        self.assertEqual(result["sections"][0]["followups"], [])
+        self.assertNotIn("Why line one?", result["document"])
+        self.assertIn("  - 1\n", result["document"])
+
     async def test_questions_and_detail_are_kept_together(self) -> None:
         with EnvPatch(fake_env(self.state_file, self.argv_log)):
             orchestrator, _ = self._orchestrator()

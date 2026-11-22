@@ -73,6 +73,17 @@ The engine runs the question in the same Claude session as the explanation for t
 
 Answers are kept in the explanation's document, under the section they are about. A full explanation (`use_cache` false) keeps the answers for the same lines. If the explanation is no longer cached, or has no section for `target`, the request fails with `explanation_missing`, and no model call is made.
 
+### `explain` with task `follow_up_line`
+
+Asks one question about one line of a section, and keeps the answer under that line's detail entry.
+
+- `task`: `"follow_up_line"`. `question` is as for `follow_up`.
+- `line`: required, an integer. It must lie inside `target`, and that line must hold code (not be blank).
+- `target`: `{start_line, end_line}` of the section the line belongs to, as the explanation has it.
+- `explanation_key` and `view` are as for `follow_up`. `use_cache` is ignored.
+
+The prompt gives the model the line, its code, and the line's detail explanation if there is one, so the answer adds to it. The result is a `result` event with `task: "follow_up_line"` and `line`, with the same fields as `follow_up`. `document` holds the answer as plain indented text under the line's item (not a heading, so it never folds away the items after it). Where the line has no item, the question is written at the top level of the detail explanation. If the line is blank or outside the section, the request fails with `bad_request` before any model call.
+
 ### `explain` with task `explain_section`
 
 Explains one section again, on its own lines, and makes that the section's explanation.
@@ -230,7 +241,8 @@ the number of its model calls that have finished and the number it makes in all.
 - `explanation_key` is the cache key of that document. Send it back with a follow-up
   or a section refresh.
 - Each section in `sections` carries `followups`, its questions as
-  `{question, answer, created_at}`, and `refreshed_at`, which is `null` unless the
+  `{question, answer, created_at, line}`, where `line` is `null` for a question about the
+  section, and `refreshed_at`, which is `null` unless the
   section was refreshed. It also carries `detail`, the line-by-line explanation as
   `{line, explanation}` items, which is empty until a detail explanation is asked for.
   The code is not sent: the source pane shows it beside the explanation.
@@ -282,8 +294,12 @@ An explanation is one Org-mode document. It is the cache entry on disk, and the
   `* Warnings`, each present only when it has items.
 - Each heading has a property drawer. A section's drawer has `:KIND: section`,
   `:SECTION_ID:` and `:LINES: A-B`, plus `:REFRESHED:` after a section refresh.
-- A question is a `** Question: ...` heading under its section, with `:KIND: question`
+- A question about the section is a `** Question: ...` heading under its section, with `:KIND: question`
   and `:CREATED:`. Its answer is the body.
+- A question about a line is text under that line's item, indented by four spaces:
+  `Question about line N (asked CREATED, FINGERPRINT): text`, then an `:ANSWER:` drawer
+  whose answer is indented by six, and `:END:`. The drawer lets TAB fold the answer. It is
+  not a heading, because a heading would fold away the items after it.
 - A detail explanation is a `** Detail explanation` subsection under its section, with
   `:KIND: detail`, written before the questions. Each line of code is an item,
   `  - LINE`, with its explanation indented on the next line. The code is not written, so

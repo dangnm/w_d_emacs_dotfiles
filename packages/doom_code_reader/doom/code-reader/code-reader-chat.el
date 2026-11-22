@@ -3,9 +3,11 @@
 ;;; Commentary:
 
 ;; A question box sits under the explanation pane.  A question is about the
-;; highlighted section, which is the section that holds the source point.  The
-;; engine answers with a `follow_up' request.  The answer is added under that
-;; section, and the engine keeps it with the section for later explanations.
+;; highlighted section, which is the section that holds the source point, or about
+;; the highlighted line when that line has a detail entry on screen.  The engine
+;; answers with a `follow_up' request, or a `follow_up_line' request for a line.  The
+;; answer is kept with the section (or under the line's entry), so the engine keeps it
+;; for later explanations.
 ;;
 ;; In the box, RET sends the question.  In the explanation pane, `a' moves to
 ;; the box.  Each question gets a view id of its own, so it never cancels the
@@ -184,10 +186,21 @@ takes the whole column the rest of the time.  The question box's text is kept."
   (let ((id (code-reader-view-active-section-id view)))
     (and id (code-reader-session-section-by-id view id))))
 
+(defun code-reader-chat--line-target (view)
+  "Return the source line the question box is about, or nil for the whole section.
+The line is the one highlighted in VIEW, when its detail entry is on screen.  Without a
+detail entry, the question is about the section, as before."
+  (let ((section (code-reader-chat--target view))
+        (line (code-reader-view-active-detail-line view)))
+    (and section line
+         (code-reader-ui-detail-entry-for-line view section line)
+         line)))
+
 (defun code-reader-chat--target-key (view)
-  "Return (START . END) of the target section, or nil when there is none."
+  "Return the question box's target as a key: (START END LINE), or nil when there is no section."
   (let ((section (code-reader-chat--target view)))
-    (and section (cons (plist-get section :start-line) (plist-get section :end-line)))))
+    (and section (list (plist-get section :start-line) (plist-get section :end-line)
+                       (code-reader-chat--line-target view)))))
 
 (defun code-reader-chat--range-text (start end)
   "Return START..END as text for a header."
@@ -199,14 +212,19 @@ takes the whole column the rest of the time.  The question box's text is kept."
   "Return the header line of VIEW's question box."
   (let* ((section (code-reader-chat--target view))
          (key (code-reader-chat--target-key view))
+         (line (code-reader-chat--line-target view))
          (status (and code-reader-chat--status
                       (equal (car code-reader-chat--status) key)
                       (cdr code-reader-chat--status)))
          (where (if section
-                    (let ((title (plist-get section :title)))
+                    (let* ((title (plist-get section :title))
+                           (start (plist-get section :start-line))
+                           (end (plist-get section :end-line))
+                           (range (code-reader-chat--range-text start end)))
                       (format "About %s%s"
-                              (code-reader-chat--range-text (plist-get section :start-line)
-                                                            (plist-get section :end-line))
+                              (cond ((null line) range)
+                                    ((= start end) (format "line %d" line))
+                                    (t (format "line %d of %s" line range)))
                               (if (and (stringp title) (not (string-empty-p title)))
                                   (format " · %s" title)
                                 "")))
@@ -238,23 +256,25 @@ what the reader typed, wherever point is."
 
 ;;; Asking
 
-(defun code-reader-chat--request (view section question id)
-  "Return the follow_up request that asks QUESTION about SECTION of VIEW.
-The request has a view id of its own, so it never supersedes the explanation.
+(defun code-reader-chat--request (view section question id &optional line)
+  "Return the request that asks QUESTION about SECTION of VIEW, or about LINE of it when given.
+A question about a line is a follow_up_line request, and the answer goes under that line's
+detail entry.  The request has a view id of its own, so it never supersedes the explanation.
 It names the explanation that the answer is added to."
   (unless (code-reader-view-explanation-key view)
     (user-error "Code Reader: there is no explanation to ask about yet"))
   (let ((request (with-current-buffer (code-reader-view-source-buffer view)
                    (code-reader-session-build-request
-                    :id id :task "follow_up"
+                    :id id :task (if line "follow_up_line" "follow_up")
                     :start-line (plist-get section :start-line)
                     :end-line (plist-get section :end-line)))))
     (setq request (plist-put request :view (format "%s#chat-%s" (code-reader-view-file view) id)))
     (setq request (plist-put request :explanation_key (code-reader-view-explanation-key view)))
-    (plist-put request :question question)))
+    (setq request (plist-put request :question question))
+    (if line (plist-put request :line line) request)))
 
 (defun code-reader-chat-send ()
-  "Send the question typed in the box, about the highlighted section."
+  "Send the question typed in the box, about the highlighted line, or else the highlighted section."
   (interactive)
   (let* ((view (or code-reader-chat--view (user-error "Code Reader: this is not a question box")))
          (question (string-trim (code-reader-chat--input-text)))
@@ -264,7 +284,7 @@ It names the explanation that the answer is added to."
     (unless section
       (user-error "Code Reader: no section is highlighted; move the cursor in the source"))
     (let* ((id (code-reader-session--new-id))
-           (request (code-reader-chat--request view section question id)))
+           (request (code-reader-chat--request view section question id (code-reader-chat--line-target view))))
       (push (cons id view) code-reader-chat--pending)
       (erase-buffer)
       (code-reader-chat--set-status view "asking Claude…")

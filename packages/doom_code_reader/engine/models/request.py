@@ -21,9 +21,11 @@ from engine.config import (
 )
 
 ALLOWED_TASKS = ("explain_file", "explain_block", "explain_function", "follow_up", "explain_section",
-                 "delete_question", "explain_detail", "explain_detail_section")
+                 "delete_question", "explain_detail", "explain_detail_section", "follow_up_line")
 DELETE_QUESTION_TASK = "delete_question"  # remove one question from an explanation; no model call
 FOLLOW_UP_TASK = "follow_up"
+# A question about one line of the target section, written under that line's detail entry.
+FOLLOW_UP_LINE_TASK = "follow_up_line"
 SECTION_TASK = "explain_section"  # explain one section again, on its own lines
 DETAIL_TASK = "explain_detail"  # explain every lines group line by line, in its existing explanation
 # The same, for one lines group only: the target must be the group's lines, as the explanation has them.
@@ -36,7 +38,8 @@ _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\]]{0,127}$")
 # An explanation's cache key (SHA-256 hex). It names a file, so it is checked strictly.
 _EXPLANATION_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 # Tasks that change an explanation that already exists, so they need its key.
-_KEY_TASKS = (FOLLOW_UP_TASK, SECTION_TASK, DELETE_QUESTION_TASK, DETAIL_TASK, DETAIL_SECTION_TASK)
+_KEY_TASKS = (FOLLOW_UP_TASK, FOLLOW_UP_LINE_TASK, SECTION_TASK, DELETE_QUESTION_TASK, DETAIL_TASK,
+              DETAIL_SECTION_TASK)
 
 
 class BadRequest(Exception):
@@ -72,7 +75,9 @@ class ExplainRequest:
     use_cache: bool
     timeout: float
     model: str | None
-    question: str | None = None  # only for FOLLOW_UP_TASK
+    question: str | None = None  # only for FOLLOW_UP_TASK and FOLLOW_UP_LINE_TASK
+    # The source line a question is about (only for FOLLOW_UP_LINE_TASK). It is inside the target.
+    line: int | None = None
     # The cache key of the explanation a follow-up, section refresh or deletion changes.
     explanation_key: str | None = None
     # The CREATED time of the question to delete (only for DELETE_QUESTION_TASK).
@@ -161,8 +166,14 @@ def parse_explain(msg: dict) -> ExplainRequest:
             target = parse_target(msg.get("target"), total_lines)
 
         question = None
-        if task == FOLLOW_UP_TASK:
+        if task in (FOLLOW_UP_TASK, FOLLOW_UP_LINE_TASK):
             question = _require_str(msg, "question", max_len=MAX_QUESTION_CHARS).strip()
+
+        line = None
+        if task == FOLLOW_UP_LINE_TASK:
+            line = _require_int(msg.get("line"), "line")
+            if not target.start_line <= line <= target.end_line:
+                raise BadRequest("'line' must be one of the lines of the target")
 
         question_at = None
         if task == DELETE_QUESTION_TASK:
@@ -217,6 +228,7 @@ def parse_explain(msg: dict) -> ExplainRequest:
             timeout=timeout,
             model=model,
             question=question,
+            line=line,
             explanation_key=explanation_key,
             question_at=question_at,
         )

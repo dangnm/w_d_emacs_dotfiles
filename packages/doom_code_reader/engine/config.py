@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ENGINE_VERSION = "0.3.0"
+ENGINE_VERSION = "0.4.0"
 PROTOCOL_VERSION = 1
 
 # Limits. Keep prompts small: the spec forbids loading the whole codebase.

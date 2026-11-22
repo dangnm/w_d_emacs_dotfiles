@@ -456,16 +456,19 @@ only that line is highlighted.  The layout is kept, and focus stays in the expla
 
 (defun code-reader-sync-jump-at-point ()
   "Jump to the source lines of the explanation section at point.
-On a detail line, jump to that source line alone."
+On a detail line, jump to that source line alone.  On a detail item whose explanation is
+folded, open it instead, and the next RET jumps."
   (interactive)
   (let* ((view (or (code-reader-session-view-of (current-buffer))
                    (user-error "Code Reader: not an explanation buffer")))
          (id (get-text-property (point) 'code-reader-section-id)))
-    (if id
-        (let* ((section (code-reader-session-section-by-id view id))
-               (entry (and section (code-reader-ui-detail-entry-at view section (point)))))
-          (code-reader-sync-jump view id (and entry (plist-get entry :line))))
-      (message "Code Reader: point is not on a section"))))
+    (cond
+     ((code-reader-ui--item-folded-p) (code-reader-explanation-tab))
+     (id
+      (let* ((section (code-reader-session-section-by-id view id))
+             (entry (and section (code-reader-ui-detail-entry-at view section (point)))))
+        (code-reader-sync-jump view id (and entry (plist-get entry :line)))))
+     (t (message "Code Reader: point is not on a section")))))
 
 (defun code-reader-sync-mouse-jump (event)
   "Mouse-1 handler: move point to the click, then jump to its section."

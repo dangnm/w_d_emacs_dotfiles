@@ -51,6 +51,18 @@ SECTIONS, with the summary and lists the defaults name, as the engine would."
   (mapconcat (lambda (line) (if (string-empty-p line) "" (concat "  " line)))
              (split-string text "\n") "\n"))
 
+(defun code-reader-test--line-question-org (question &optional indent)
+  "Return a question about one line, as the engine writes it.
+QUESTION is (LINE TEXT ANSWER CREATED).  The question is indented INDENT, which is four spaces
+under the line's item by default.  Its answer is in an :ANSWER: drawer, indented six."
+  (let ((indent (or indent "    ")))
+    (format "%sQuestion about line %d (asked %s, 0123456789abcdef): %s\n%s:ANSWER:\n%s\n%s:END:\n"
+            indent (nth 0 question) (nth 3 question) (nth 1 question)
+            indent
+            (mapconcat (lambda (line) (if (string-empty-p line) "" (concat "      " line)))
+                       (split-string (nth 2 question) "\n") "\n")
+            indent)))
+
 (defun code-reader-test--section-org (section)
   "Return the Org heading, drawer, text and questions of protocol SECTION."
   (let* ((start (plist-get section :source_start))
@@ -64,14 +76,23 @@ SECTIONS, with the summary and lists the defaults name, as the engine would."
                       (plist-get section :id) start end
                       (code-reader-test--body (plist-get section :explanation)))))
     ;; A detail explanation is a subsection, written before the questions.  Each item is
-    ;; (LINE EXPLANATION), as the engine writes it: the number, then the explanation.
-    (let ((detail (plist-get section :detail)))
-      (when detail
+    ;; (LINE EXPLANATION), as the engine writes it: the number, then the explanation.  A
+    ;; question about a line (see :line-followups) follows that line's item.
+    (let* ((detail (plist-get section :detail))
+           (questions (plist-get section :line-followups))
+           (items (mapconcat (lambda (item)
+                               (concat (format "  - %d\n    %s\n" (nth 0 item) (nth 1 item))
+                                       (mapconcat #'code-reader-test--line-question-org
+                                                  (seq-filter (lambda (q) (= (nth 0 q) (nth 0 item)))
+                                                              questions)
+                                                  "")))
+                             detail ""))
+           (orphans (mapconcat (lambda (q) (code-reader-test--line-question-org q "  "))
+                               (seq-remove (lambda (q) (assoc (nth 0 q) detail)) questions)
+                               "")))
+      (when (or detail questions)
         (setq org (concat org "** Detail explanation\n  :PROPERTIES:\n  :KIND: detail\n  :END:\n"
-                          (mapconcat (lambda (item)
-                                       (format "  - %d\n    %s\n" (nth 0 item) (nth 1 item)))
-                                     detail "")
-                          "\n"))))
+                          items orphans "\n"))))
     (dolist (followup (plist-get section :followups))
       (setq org (concat org
                         (format "** Question: %s\n  :PROPERTIES:\n  :KIND: question\n  :CREATED: %s\n  :END:\n%s\n"
@@ -1129,6 +1150,79 @@ Skipped when evil-snipe is not installed."
           (should-not evil-snipe-override-local-mode)))
     (evil-snipe-mode -1)))
 
+(ert-deftest code-reader-test-TAB-folds-and-opens-a-detail-item-from-anywhere-on-its-line ()
+  "TAB on a detail item folds and opens it wherever point is on the item's line, not only at its start.
+Org's own TAB works only from the start of a list item's line, so a line number with several digits
+could not be opened."
+  (code-reader-test--with-panes 200 code-reader-test--long-detail-sections
+    (code-reader-ui-render view nil nil t)
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 100)))
+    (code-reader-sync--run-point view)
+    (with-selected-window exp-win
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (goto-char (+ (code-reader-test--text-pos "  - 100\n") 6))
+        (should-not (invisible-p (code-reader-test--text-pos "Explains line 100.")))
+        (code-reader-explanation-tab)
+        (should (invisible-p (code-reader-test--text-pos "Explains line 100.")))
+        (should (= (point) (+ (code-reader-test--text-pos "  - 100\n") 6)))
+        (code-reader-explanation-tab)
+        (should-not (invisible-p (code-reader-test--text-pos "Explains line 100.")))))))
+
+(ert-deftest code-reader-test-TAB-is-bound-to-the-explanation-tab-command ()
+  "TAB in the explanation pane runs the command that handles detail items, under evil too."
+  (should (eq (lookup-key code-reader-explanation-mode-map (kbd "TAB")) #'code-reader-explanation-tab)))
+
+(ert-deftest code-reader-test-TAB-on-a-line-question-folds-and-opens-its-answer ()
+  "TAB on the question about a line folds its answer, and TAB again opens it.  The items after it stay in view."
+  (code-reader-test--with-panes 200 code-reader-test--line-question-sections
+    (code-reader-ui-render view nil nil t)
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 1)))
+    (code-reader-sync--run-point view)
+    (with-selected-window exp-win
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (goto-char (+ (code-reader-test--text-pos "Question about line 1 (asked") 10))
+        (should-not (invisible-p (code-reader-test--text-pos "Because line one.")))
+        (code-reader-explanation-tab)
+        (should (invisible-p (code-reader-test--text-pos "Because line one.")))
+        (should-not (invisible-p (code-reader-test--text-pos "Question about line 1 (asked")))
+        (should-not (invisible-p (code-reader-test--text-pos "The docstring.")))
+        (code-reader-explanation-tab)
+        (should-not (invisible-p (code-reader-test--text-pos "Because line one.")))))))
+
+(ert-deftest code-reader-test-TAB-on-the-answer-text-folds-the-answer ()
+  "TAB anywhere in a line question's answer folds that answer."
+  (code-reader-test--with-panes 200 code-reader-test--line-question-sections
+    (code-reader-ui-render view nil nil t)
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 1)))
+    (code-reader-sync--run-point view)
+    (with-selected-window exp-win
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (goto-char (+ (code-reader-test--text-pos "Because line one.") 4))
+        (code-reader-explanation-tab)
+        (should (invisible-p (code-reader-test--text-pos "Because line one.")))
+        (should-not (invisible-p (code-reader-test--text-pos "The docstring.")))))))
+
+(ert-deftest code-reader-test-the-tab-key-event-also-runs-the-explanation-tab ()
+  "A Tab key that arrives as the tab event, not as TAB, runs the same command."
+  (should (eq (lookup-key code-reader-explanation-mode-map [tab]) #'code-reader-explanation-tab)))
+
+(ert-deftest code-reader-test-RET-opens-a-folded-detail-item-and-then-jumps ()
+  "RET on a folded detail item opens it, without moving the source; RET on the open item jumps."
+  (code-reader-test--with-panes 200 code-reader-test--long-detail-sections
+    (code-reader-ui-render view nil nil t)
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 1)))
+    (code-reader-sync--run-point view)
+    (with-selected-window exp-win
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (goto-char (+ (code-reader-test--text-pos "  - 100\n") 6))
+        (code-reader-explanation-tab)
+        (should (invisible-p (code-reader-test--text-pos "Explains line 100.")))
+        (code-reader-sync-jump-at-point)
+        (should-not (invisible-p (code-reader-test--text-pos "Explains line 100.")))
+        (should (= (with-current-buffer source (line-number-at-pos (point) t)) 1))
+        (code-reader-sync-jump-at-point)
+        (should (= (with-current-buffer source (line-number-at-pos (point) t)) 100))))))
+
 (ert-deftest code-reader-test-C-is-bound-and-the-key-guide-lists-it ()
   "C collapses every section of the explanation, and the key guide lists it."
   (should (eq (lookup-key code-reader-explanation-mode-map "C") #'code-reader-collapse-all))
@@ -1954,6 +2048,112 @@ so the lines around it are in view too."
       (should (= (count-screen-lines (window-start src-win)
                                      (code-reader-test--line-pos source 100) nil src-win)
                  (/ (window-body-height src-win) 2))))))
+
+;;; Questions about one line
+
+(defconst code-reader-test--line-question-sections
+  (list (append (code-reader-test--section "lq-s1" 1 2 "Greet" "Greets.")
+                (list :detail (list (list 1 "Starts greet.") (list 2 "The docstring."))
+                      :line-followups (list (list 1 "Why one?" "Because line one." "2026-11-22T10:01:00")))))
+  "A section with a question about line 1, and a detail entry for line 2 after that question.")
+
+(ert-deftest code-reader-test-entries-after-a-line-question-are-still-found ()
+  "A question about a line sits between that line's entry and the next, and the next entry is still found."
+  (code-reader-test--with-panes 200 code-reader-test--line-question-sections
+    (code-reader-ui-render view nil nil t)
+    ;; The cursor on line 1 opens the section and its detail, as it does in use.
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 1)))
+    (code-reader-sync--run-point view)
+    (let ((section (code-reader-session-section-by-id view "lq-s1")))
+      (should (code-reader-ui-detail-entry-for-line view section 1))
+      (should (code-reader-ui-detail-entry-for-line view section 2)))))
+
+(defconst code-reader-test--orphan-question-sections
+  (list (append (code-reader-test--section "oq-s1" 1 5 "Lines" "Lines.")
+                (list :detail (list (list 1 "First line."))
+                      :line-followups (list (list 5 "Why five?" "Because five." "2026-11-22T10:02:00")))))
+  "A section whose question is about line 5, which has no detail entry, so the question is written last.")
+
+(ert-deftest code-reader-test-an-entry-does-not-take-in-a-question-about-another-line ()
+  "A question about a line with no entry is written after the last entry, and that entry ends before it."
+  (code-reader-test--with-panes 200 code-reader-test--orphan-question-sections
+    (code-reader-ui-render view nil nil t)
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 1)))
+    (code-reader-sync--run-point view)
+    (let* ((section (code-reader-session-section-by-id view "oq-s1"))
+           (entry (code-reader-ui-detail-entry-for-line view section 1)))
+      (should entry)
+      (with-current-buffer (code-reader-view-explanation-buffer view)
+        (should (<= (plist-get entry :end) (code-reader-test--text-pos "  Question about line 5")))))))
+
+(ert-deftest code-reader-test-a-line-question-is-in-view-when-its-detail-opens ()
+  "Opening the detail shows the question about its line, with the answer folded."
+  (code-reader-test--with-panes 200 code-reader-test--line-question-sections
+    (code-reader-ui-render view nil nil t)
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 1)))
+    (code-reader-sync--run-point view)
+    (with-current-buffer (code-reader-view-explanation-buffer view)
+      (should-not (invisible-p (code-reader-test--text-pos "Question about line 1 (asked")))
+      (should-not (invisible-p (code-reader-test--text-pos "Because line one."))))))
+
+(ert-deftest code-reader-test-the-question-at-point-names-its-section-and-its-question ()
+  "Point on a question about a line gives its section and its question, so that d can delete it."
+  (code-reader-test--with-panes 200 code-reader-test--line-question-sections
+    (code-reader-ui-render view nil nil t)
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 1)))
+    (code-reader-sync--run-point view)
+    (with-current-buffer (code-reader-view-explanation-buffer view)
+      (goto-char (code-reader-test--text-pos "Question about line 1 (asked"))
+      (let ((question (code-reader-commands--question-at-point)))
+        (should (equal (plist-get question :section) "lq-s1"))
+        (should (equal (plist-get question :created) "2026-11-22T10:01:00"))
+        (should (equal (plist-get question :text) "Why one?")))
+      ;; The answer belongs to the question too.
+      (goto-char (code-reader-test--text-pos "Because line one."))
+      (should (equal (plist-get (code-reader-commands--question-at-point) :created) "2026-11-22T10:01:00"))
+      ;; The next entry is not a question.
+      (goto-char (code-reader-test--text-pos "The docstring."))
+      (should-not (code-reader-commands--question-at-point)))))
+
+(ert-deftest code-reader-test-a-asks-about-the-highlighted-line-when-it-has-a-visible-entry ()
+  "a asks about the highlighted line when its detail entry is on screen, and about the section otherwise."
+  (code-reader-test--with-panes 200 code-reader-test--line-question-sections
+    (code-reader-ui-render view nil nil t)
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 1)))
+    (code-reader-sync--run-point view)
+    (should (= (code-reader-chat--line-target view) 1))
+    (with-current-buffer (code-reader-view-explanation-buffer view)
+      (code-reader-collapse-all))
+    (should-not (code-reader-chat--line-target view))))
+
+(ert-deftest code-reader-test-a-question-about-a-line-is-sent-as-follow-up-line ()
+  "A question about a highlighted line is a follow_up_line request naming the line, and any other is a follow_up."
+  (code-reader-test--with-panes 200 code-reader-test--line-question-sections
+    (code-reader-ui-render view nil nil t)
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 1)))
+    (code-reader-sync--run-point view)
+    (let* ((section (code-reader-session-section-by-id view "lq-s1"))
+           (by-line (code-reader-chat--request view section "Why?" "chat-1" (code-reader-chat--line-target view)))
+           (by-section (code-reader-chat--request view section "Why?" "chat-2" nil)))
+      (should (equal (plist-get by-line :task) "follow_up_line"))
+      (should (= (plist-get by-line :line) 1))
+      (should (= (plist-get (plist-get by-line :target) :start_line) 1))
+      (should (= (plist-get (plist-get by-line :target) :end_line) 2))
+      (should (equal (plist-get by-section :task) "follow_up"))
+      (should-not (plist-get by-section :line)))))
+
+(ert-deftest code-reader-test-the-question-box-names-the-highlighted-line ()
+  "The question box says which line the question is about, when a line is highlighted."
+  (code-reader-test--with-panes 200 code-reader-test--line-question-sections
+    (code-reader-ui-render view nil nil t)
+    (with-current-buffer source (goto-char (code-reader-test--line-pos source 1)))
+    (code-reader-sync--run-point view)
+    (should (string-match-p "About line 1 of lines 1–2" (code-reader-chat--header view)))))
+
+(ert-deftest code-reader-test-the-key-guide-says-a-asks-about-the-line-or-the-section ()
+  "The key guide names what a asks about."
+  (let ((text (mapconcat #'substring-no-properties (code-reader-guide--lines) "\n")))
+    (should (string-match-p "a: ask about the highlighted line or section" text))))
 
 ;;; End-to-end (real engine and fake claude)
 

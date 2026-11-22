@@ -111,14 +111,24 @@ instead.
 
 **Reading the explanation.** The right pane is an Org buffer. Each section is a
 heading, and the sections start folded. `TAB` folds and unfolds the section at
-point, and `S-TAB` folds or unfolds all of them.
+point, or one line's detail item when point is on that item (from anywhere on its
+line), and `S-TAB` folds or unfolds all of them. A detail item's fold is not kept when
+the explanation is redrawn, for example after a question is answered.
 
 **Asking about a section.** Under the explanation pane is a question box. Its
 header shows the lines it is about: the section highlighted in the explanation,
 which is the section that holds the source point. Type a question and press
 `RET`. The answer is added to the explanation as a heading nested under that
 section, `** Question: ...`, and the section opens to show it. The answer stays
-folded until you press `TAB` on the question. The question is kept in the cache
+folded until you press `TAB` on the question.
+
+**Asking about a line.** When the highlighted line has a detail entry (the source
+point is on it, or you pointed at it in the explanation), `a` asks about that line
+instead. The header then says `About line 19 of lines 1–60`. The answer appears under
+that line's entry, in a drawer. `TAB` on the question, or anywhere in its answer, folds
+the answer away, and `TAB` again opens it. The answer is not a heading, because folding a
+heading would hide the lines after it. `d` on the question or its answer deletes it. A full refresh (`g`) keeps the question while its line is
+unchanged, and a section refresh (`r`) removes it. The question is kept in the cache
 file, so reopening the file shows it again. `a` in the explanation pane moves to
 the box. From the box, press `ESC` and then `C-w k` to
 go back. A question sends the file text and the section's lines, and Claude can
@@ -143,7 +153,7 @@ because it is one section's worth of calls, and it replaces only that section's 
 `M-x code-reader-explain-file` runs the same whole-file explanation without
 opening the layout.
 
-In the explanation pane: `RET` or click jumps to the source, `TAB` folds or
+In the explanation pane: `RET` or click jumps to the source (on a folded detail item, `RET` opens it instead), `TAB` folds or
 unfolds a section, `g` refreshes (bypasses the cache; it asks yes or no first, because it replaces the saved file), `r` refreshes only the
 highlighted section (the lines the question box is about) and leaves the rest of
 the explanation as it is, `c` cancels, `p` shows the explanation's cache file and copies its path, `d` deletes the question

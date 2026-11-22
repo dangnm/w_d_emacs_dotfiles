@@ -270,8 +270,8 @@ elsewhere.  The file is the explanation as an Org document."
            (insert text)
            (call-process-region (point-min) (point-max) "pbcopy")))))
 
-(defun code-reader-commands--question-at-point ()
-  "Return a plist (:created :text :section) for the question at point, or nil.
+(defun code-reader-commands--heading-question-at-point ()
+  "Return a plist (:created :text :section) for the \"** Question:\" heading at point, or nil.
 Point is on a question when the nearest heading is a \"** Question:\" heading of the
 explanation.  CREATED is its CREATED time, which identifies it to the engine."
   (save-excursion
@@ -287,6 +287,40 @@ explanation.  CREATED is its CREATED time, which identifies it to the engine."
                       :text (string-trim (replace-regexp-in-string "\\`Question: *" "" heading))
                       :section (org-entry-get nil "SECTION_ID"))))))
       (error nil))))
+
+(defconst code-reader-commands--line-question-regexp
+  "^[ \t][ \t]+Question about line [0-9]+ (asked \\([^,]+\\), \\([0-9a-f]*\\)): \\(.*\\)$"
+  "Matches the first line of a question about a line, written under that line's detail entry.")
+
+(defun code-reader-commands--line-question-at-point ()
+  "Return a plist (:created :text :section) for the question about a line at point, or nil.
+Point is in such a question when it is on its first line or on its answer.  The walk up
+stops at the entry's item or at a heading, so a question of another line is not taken."
+  (save-excursion
+    (beginning-of-line)
+    (catch 'found
+      (while t
+        (cond
+         ((looking-at code-reader-commands--line-question-regexp)
+          (let ((created (match-string-no-properties 1))
+                (text (string-trim (match-string-no-properties 3))))
+            (throw 'found
+                   (list :created created
+                         :text text
+                         :section (save-excursion
+                                    (org-back-to-heading t)
+                                    (while (and (> (org-current-level) 1) (org-up-heading-safe)))
+                                    (org-entry-get nil "SECTION_ID"))))))
+         ((or (looking-at "^  - [0-9]") (looking-at "^\\*"))
+          (throw 'found nil)))
+        (when (bobp) (throw 'found nil))
+        (forward-line -1)))))
+
+(defun code-reader-commands--question-at-point ()
+  "Return a plist (:created :text :section) for the question at point, or nil.
+That is a \"** Question:\" heading, or a question about a line of the detail explanation."
+  (or (code-reader-commands--heading-question-at-point)
+      (code-reader-commands--line-question-at-point)))
 
 (defun code-reader-delete-question ()
   "Delete the question at point from the explanation and its saved file, after asking.

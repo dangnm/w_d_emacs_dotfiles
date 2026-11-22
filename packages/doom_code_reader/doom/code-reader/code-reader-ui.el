@@ -56,13 +56,62 @@
 
 ;;; Explanation mode
 
+(defun code-reader-ui--answer-drawer-pos ()
+  "Return the position of the :ANSWER: line of the question about a line that point is on, or nil.
+Point is on such a question when it is on the question's line, on its :ANSWER: line, or in its answer."
+  (save-excursion
+    (beginning-of-line)
+    (cond
+     ((looking-at "^[ \t]+Question about line [0-9]+ (asked ")
+      (forward-line 1)
+      (and (looking-at "^[ \t]+:ANSWER:[ \t]*$") (point)))
+     ((looking-at "^[ \t]+:ANSWER:[ \t]*$") (point))
+     (t
+      (catch 'found
+        (while (= (forward-line -1) 0)
+          (cond
+           ((looking-at "^[ \t]+:ANSWER:[ \t]*$") (throw 'found (point)))
+           ((or (looking-at "^  - [0-9]") (looking-at "^\\*")
+                (looking-at "^[ \t]+:END:[ \t]*$") (looking-at "^[ \t]+Question about line"))
+            (throw 'found nil))))
+        nil)))))
+
+(defun code-reader-explanation-tab ()
+  "TAB in the explanation pane: fold or unfold what point is on.
+A detail item is folded from the start of its line, because Org folds a list item only from
+there, and point stays where it was.  A question about a line is folded by its answer drawer,
+from anywhere in the question.  Anywhere else TAB is Org's own TAB."
+  (interactive)
+  (let ((answer (code-reader-ui--answer-drawer-pos)))
+    (cond
+     ((org-at-item-p)
+      (save-excursion
+        (beginning-of-line)
+        (org-cycle)))
+     (answer
+      (save-excursion
+        (goto-char answer)
+        (org-cycle)))
+     (t (org-cycle)))))
+
+(defun code-reader-ui--item-folded-p ()
+  "Return non-nil when point is on a detail item whose explanation is folded away."
+  (save-excursion
+    (beginning-of-line)
+    (and (org-at-item-p)
+         (= (forward-line 1) 0)
+         (not (eobp))
+         (invisible-p (point)))))
+
 (defvar code-reader-explanation-mode-map
   (let ((map (make-sparse-keymap)))
     ;; Everything else (folding with TAB, Org's own motion) is Org's.
     (set-keymap-parent map org-mode-map)
     (define-key map (kbd "RET") #'code-reader-sync-jump-at-point)
     (define-key map [mouse-1] #'code-reader-sync-mouse-jump)
-    (define-key map (kbd "TAB") #'org-cycle)
+    (define-key map (kbd "TAB") #'code-reader-explanation-tab)
+    ;; The Tab key can arrive as the tab event rather than as TAB, so both are bound.
+    (define-key map [tab] #'code-reader-explanation-tab)
     (define-key map (kbd "<backtab>") #'org-shifttab)
     (define-key map "g" #'code-reader-refresh)
     (define-key map "c" #'code-reader-cancel)
@@ -84,7 +133,8 @@ Each section is a heading.  TAB folds and unfolds it, and the questions asked
 about it are nested under it.  RET or mouse-1 on a section jumps to its source
 lines.  g refreshes the explanation, r refreshes the highlighted section, D explains
 the whole file in detail (after a yes or no), s explains the highlighted section in
-detail, C collapses every section, a asks about it, c cancels a running request,
+detail, C collapses every section, a asks about the highlighted line or section,
+c cancels a running request,
 t toggles the panel and q closes the view.
 Evil users get the same keys in motion state."
   (setq-local truncate-lines nil)
@@ -104,7 +154,8 @@ Evil users get the same keys in motion state."
   (when (fboundp 'evil-define-key*)
     (evil-define-key* 'motion code-reader-explanation-mode-map
       (kbd "RET") #'code-reader-sync-jump-at-point
-      (kbd "TAB") #'org-cycle
+      (kbd "TAB") #'code-reader-explanation-tab
+      [tab] #'code-reader-explanation-tab
       (kbd "<backtab>") #'org-shifttab
       "g" #'code-reader-refresh
       "c" #'code-reader-cancel
@@ -369,7 +420,7 @@ The entry ends before the next item, the next heading, or LIMIT.  Match data is 
   (save-excursion
     (goto-char item)
     (forward-line 1)
-    (goto-char (if (re-search-forward "^\\(  - [0-9]+\\(?: ·.*\\)?$\\|\\*\\)" limit t)
+    (goto-char (if (re-search-forward "^\\(  - [0-9]+\\(?: ·.*\\)?$\\|  Question about line\\|\\*\\)" limit t)
                    (match-beginning 0)
                  limit))
     (skip-chars-backward " \t\n" item)

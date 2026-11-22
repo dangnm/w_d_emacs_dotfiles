@@ -31,7 +31,7 @@
 (defconst code-reader-guide-rows
   '((("RET" . "jump to the source") . ("g" . "refresh the explanation"))
     (("click" . "jump to the source") . ("r" . "refresh this section"))
-    (("a" . "ask about this section") . ("c" . "cancel the running request"))
+    (("a" . "ask about the highlighted line or section") . ("c" . "cancel the running request"))
     (("C-w h" . "go back to the source") . ("t / q" . "toggle the pane / close the reader"))
     (("C-w j" . "go to the question box") . ("p" . "copy the cache file path"))
     (("d" . "delete the question at point") . ("D" . "explain the whole file in detail"))

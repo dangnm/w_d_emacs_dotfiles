@@ -135,7 +135,7 @@ The document is Org text. The same text is the cache file and the right pane.
 Rules:
 
 - Each heading has a property drawer with `:KIND:`. Sections also have `:SECTION_ID:` and `:LINES:`, and `:REFRESHED:` after a section refresh.
-- Questions are `**` headings nested under their section. Their identity is `:CREATED:`, a microsecond timestamp.
+- Questions about a section are `**` headings nested under it. A question about one line is indented text under that line's detail item, with its answer in an `:ANSWER:` drawer that TAB can fold. It is not a heading, so folding it never hides the items after it. Their identity is `:CREATED:`, a microsecond timestamp.
 - Section ids are `<snapshot hash, 8 chars>-s<n>`. They are stable for the life of the document.
 - Body text is indented by two spaces. Model text therefore cannot create a heading, a drawer or a keyword.
 - Both sides read the format. The engine uses `org.py`. Emacs reads the same properties in `code-reader-cache.el`, with a small reader for headings and `:SECTION_ID:`.
@@ -165,6 +165,7 @@ Explanation tasks go through `explain`:
 |---|---|---|---|---|
 | `explain_file`, `explain_block`, `explain_function` | Only on a cache miss | Writes the explanation | No | `document`, `sections`, `cache_path`, `explanation_key` |
 | `follow_up` | Yes | Adds a question under its section | Yes | `answer`, `document`, `sections` |
+| `follow_up_line` | Yes | Adds a question under one line's detail item | Yes | `answer`, `line`, `document`, `sections` |
 | `explain_section` | Yes | Replaces the section text and removes its questions | Yes | `explanation`, `document`, `sections` |
 | `delete_question` | **No** | Removes one question | Yes | `document`, `sections`, `cache_path` |
 
@@ -198,7 +199,7 @@ Error codes: `bad_request`, `claude_not_found`, `claude_timeout`, `claude_failed
 3. No confirmation: only one section changes.
 
 **8.5 Delete a question (`d`)**
-1. Point must be on a `**` question heading or in its text. Otherwise the command refuses without asking.
+1. Point must be on a `**` question heading or in its text, or on a question about a line (its first line or its answer). Otherwise the command refuses without asking.
 2. `y-or-n-p` asks first, showing the question text.
 3. `delete_question` removes the question in the engine, with no Claude call. The view re-renders with its anchors kept.
 
@@ -248,9 +249,9 @@ Guards: `code-reader-sync--syncing` (set while code moves a window), `sync-targe
 
 ## 12. Testing
 
-- **Python** (149 tests): unit tests for parsing, validation, the Org round trip and the cache; pipeline tests for the orchestrator (fake CLI), cancellation and supersede, the socket server, and a subprocess engine.
+- **Python** (164 tests): unit tests for parsing, validation, the Org round trip and the cache; pipeline tests for the orchestrator (fake CLI), cancellation and supersede, the socket server, and a subprocess engine.
   `python3 -m unittest discover -s tests -t . -p 'test_*.py'`
-- **ERT** (116 tests, batch; one is skipped unless evil-snipe is on the load path): sync, highlight, detail-line and fold logic; the question box; the key table; saved-explanation lookup; deletion and confirmations; and an end-to-end test through the real engine with the fake CLI. The end-to-end test also checks that Emacs finds the file the engine wrote.
+- **ERT** (130 tests, batch; one is skipped unless evil-snipe is on the load path): sync, highlight, detail-line and fold logic; the question box; the key table; saved-explanation lookup; deletion and confirmations; and an end-to-end test through the real engine with the fake CLI. The end-to-end test also checks that Emacs finds the file the engine wrote.
   `emacs -Q --batch -L doom/code-reader -L tests/elisp -l tests/elisp/code-reader-test.el -f ert-run-tests-batch-and-exit`
 - **Real CLI** (manual, not in CI): a 77-line file took 23 s and about 1.8 cents. A follow-up question took about 8 s.
 
@@ -293,6 +294,7 @@ Guards: `code-reader-sync--syncing` (set while code moves a window), `sync-targe
 | Questions live inside the document | One file to browse. Questions survive `g` by line range | Separate follow-up store (two sources of truth, the previous design) |
 | Deletion goes through the engine | Single writer. No Claude call | Emacs edits the file |
 | Folders by project and file path | Browsable in Finder and Emacs | Hash-prefix folders (unreadable, which was the original layout) |
+| A question about a line is indented text under its item, with the answer in a drawer | A heading folds away everything after it, which hid the items below a question. Plain text is always visible and still sits under its line | A level-3 heading (rejected: folding it hid the later items); a foldable drawer under the item (possible, but needs drawer folding that cannot be checked in batch Emacs) |
 | Model in the header, prompts not checked on open | Cheap check without the engine | Fingerprint in Emacs (possible, more code) |
 
 ## 16. Questions for reviewers

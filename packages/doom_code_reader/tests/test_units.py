@@ -27,7 +27,7 @@ from engine.models.response import (
     normalize_section_explanation,
     parse_structured,
 )
-from engine.orchestrator import _carry_details, _detail_pieces, _split_range
+from engine.orchestrator import _carry_details, _carry_questions, _detail_pieces, _split_range
 from engine.prompts import PromptError, build_system_prompt, build_user_prompt, prompt_fingerprint, render
 from tests.helpers import FAKE_CLAUDE, explain_message, make_project
 
@@ -668,6 +668,77 @@ class OrgDocumentTests(unittest.TestCase):
             parse_document(orphan)
 
 
+class LineQuestionTests(unittest.TestCase):
+    """A question about one line is written under that line's detail entry."""
+
+    @staticmethod
+    def _doc() -> Document:
+        section = Section(
+            id="s1", source_start=1, source_end=3, title="Greet", explanation="Greets.",
+            detail=[DetailLine(1, "Starts greet."), DetailLine(2, "The docstring."), DetailLine(3, "Closes it.")],
+            detail_fingerprint="0123456789abcdef",
+            followups=[Question("Why greet?", "Because.", "2026-11-22T10:00:00")],
+            line_followups=[Question("Why one?", "Because line 1.", "2026-11-22T10:01:00", line=1,
+                                     fingerprint="aaaaaaaaaaaaaaaa")],
+        )
+        return Document(file="sample.el", sections=[section])
+
+    def test_a_line_question_is_written_right_after_its_line_item(self) -> None:
+        text = render_document(self._doc())
+        self.assertIn("  - 1\n    Starts greet.\n"
+                      "    Question about line 1 (asked 2026-11-22T10:01:00, aaaaaaaaaaaaaaaa): Why one?\n"
+                      "    :ANSWER:\n"
+                      "      Because line 1.\n"
+                      "    :END:\n"
+                      "  - 2\n    The docstring.\n", text)
+        self.assertLess(text.index("Question about line 1 (asked"), text.index("** Question: Why greet?"))
+
+    def test_a_line_question_is_not_a_heading_so_folding_it_cannot_hide_the_items_after_it(self) -> None:
+        text = render_document(self._doc())
+        self.assertNotIn("*** ", text)
+        self.assertIn(":ANSWER:\n      Because line 1.\n    :END:\n  - 2\n", text)
+
+    def test_a_line_question_written_without_an_answer_drawer_still_reads(self) -> None:
+        text = ("* Lines 1–3 · Greet\n  :PROPERTIES:\n  :KIND: section\n  :SECTION_ID: s1\n  :LINES: 1-3\n  :END:\n"
+                "  Greets.\n\n"
+                "** Detail explanation\n  :PROPERTIES:\n  :KIND: detail\n  :END:\n"
+                "  - 1\n    Starts greet.\n"
+                "    Question about line 1 (asked 2026-11-22T10:01:00, aaaaaaaaaaaaaaaa): Why one?\n"
+                "      Because line 1.\n"
+                "  - 2\n    The docstring.\n")
+        question = parse_document(text).sections[0].line_followups[0]
+        self.assertEqual((question.line, question.question, question.answer), (1, "Why one?", "Because line 1."))
+
+    def test_a_line_question_reads_back_under_its_line(self) -> None:
+        doc = self._doc()
+        self.assertEqual(parse_document(render_document(doc)), doc)
+        self.assertEqual(parse_document(render_document(doc)).sections[0].line_followups[0].line, 1)
+
+    def test_entries_after_a_line_question_are_still_read(self) -> None:
+        doc = self._doc()
+        parsed = parse_document(render_document(doc))
+        self.assertEqual(parsed.sections[0].detail, doc.sections[0].detail)
+        self.assertEqual(parsed.sections[0].followups, doc.sections[0].followups)
+
+    def test_a_line_question_whose_line_has_no_item_is_kept_after_the_last_item(self) -> None:
+        doc = self._doc()
+        doc.sections[0].detail = [DetailLine(2, "The docstring.")]
+        doc.sections[0].detail_fingerprint = ""
+        text = render_document(doc)
+        self.assertLess(text.index("  - 2\n"), text.index("Question about line 1 (asked"))
+        parsed = parse_document(text)
+        self.assertEqual(parsed.sections[0].detail, [DetailLine(2, "The docstring.")])
+        self.assertEqual(parsed.sections[0].line_followups, doc.sections[0].line_followups)
+
+    def test_a_detail_with_only_line_questions_is_still_written_and_read(self) -> None:
+        doc = self._doc()
+        doc.sections[0].detail = []
+        doc.sections[0].detail_fingerprint = ""
+        parsed = parse_document(render_document(doc))
+        self.assertEqual(parsed.sections[0].detail, [])
+        self.assertEqual(parsed.sections[0].line_followups, doc.sections[0].line_followups)
+
+
 class DetailTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -678,6 +749,39 @@ class DetailTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
+
+    def test_line_question_request_names_a_line_inside_its_target(self) -> None:
+        req = parse_explain(explain_message(self.root, self.source, task="follow_up_line", target=(2, 3),
+                                            explanation_key=KEY, question="Why?", line=2))
+        self.assertEqual(req.task, "follow_up_line")
+        self.assertEqual(req.line, 2)
+        self.assertEqual(req.target, Target(2, 3))
+        with self.assertRaises(BadRequest):
+            parse_explain(explain_message(self.root, self.source, task="follow_up_line", target=(2, 3),
+                                          explanation_key=KEY, question="Why?", line=5))
+        with self.assertRaises(BadRequest):
+            parse_explain(explain_message(self.root, self.source, task="follow_up_line", target=(2, 3),
+                                          explanation_key=KEY, question="Why?"))
+
+    def test_a_line_question_is_carried_over_only_while_its_line_is_the_same(self) -> None:
+        made_from = ["a", "", "c"]
+        old = Document(sections=[Section(
+            id="s", source_start=1, source_end=3, title="", explanation="x",
+            line_followups=[Question("Why c?", "Because.", "t", line=3,
+                                     fingerprint=detail_fingerprint(made_from, 3, 3))])])
+
+        def fresh() -> Document:
+            return Document(sections=[Section(id="t", source_start=1, source_end=3, title="", explanation="new")])
+
+        same = fresh()
+        _carry_questions(old, same, ["a", "", "c"])
+        self.assertEqual(same.sections[0].line_followups, old.sections[0].line_followups)
+        for lines in (["a", "", "changed"],  # the line's code changed
+                      ["a", "", ""],  # the line is blank now
+                      ["a"]):  # the file got shorter
+            dropped = fresh()
+            _carry_questions(old, dropped, lines)
+            self.assertEqual(dropped.sections[0].line_followups, [], lines)
 
     def test_section_detail_request_covers_only_its_own_lines_and_needs_the_key(self) -> None:
         req = parse_explain(explain_message(self.root, self.source, task="explain_detail_section", target=(2, 3),
