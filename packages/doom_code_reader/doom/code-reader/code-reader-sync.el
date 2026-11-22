@@ -13,7 +13,9 @@
 ;;      that the section starts at its top, and its source lines are highlighted.
 ;;      Scroll-driven sync never moves the source point.
 ;;   C. Source point moved: after idle, the section containing point is
-;;      highlighted in the explanation pane.  Nothing is scrolled.
+;;      highlighted in the explanation pane.  When the cursor enters a different
+;;      section, that section is placed at the top of the explanation pane, even
+;;      if it is already on screen.  A scroll that the cursor caused is left to C.
 ;;   D. Explanation RET or mouse-1: the source point moves to the section, the
 ;;      source pane recentres, and the source range is highlighted.
 ;;
@@ -31,6 +33,8 @@
 (require 'code-reader-session)
 (require 'code-reader-highlight)
 (require 'code-reader-ui)
+
+(declare-function code-reader-chat-refresh "code-reader-chat" (view))
 
 (defvar code-reader-sync--syncing nil
   "Non-nil while Code Reader moves a window itself; scroll events are ignored.")
@@ -62,7 +66,10 @@ Safe to call more than once."
              (view (code-reader-session-view-of buffer)))
         (when view
           (cond ((eq buffer (code-reader-view-source-buffer view))
-                 (code-reader-sync--schedule view 'source))
+                 ;; A scroll that moving the cursor caused is left to the cursor sync (C),
+                 ;; which takes the section the cursor is in.  Its timer is pending now.
+                 (unless (timerp (code-reader-view-point-timer view))
+                   (code-reader-sync--schedule view 'source)))
                 ((eq buffer (code-reader-view-explanation-buffer view))
                  (code-reader-sync--schedule view 'explanation))))))))
 
@@ -101,7 +108,47 @@ Safe to call more than once."
           (when (and section
                      (not (equal (plist-get section :id)
                                  (code-reader-view-active-section-id view))))
-            (code-reader-sync--highlight-active view section)))))))
+            (code-reader-sync--highlight-active view section)
+            (code-reader-sync--follow-in-explanation view section)))))))
+
+(defun code-reader-sync--follow-in-explanation (view section)
+  "Place SECTION at the top of VIEW's explanation pane, because the cursor entered it.
+This is done even when SECTION is already on screen, so that the pane moves line by
+line with the cursor, as it does when the source is paged."
+  (let ((window (code-reader-ui-explanation-window view)))
+    (when (window-live-p window)
+      (setf (code-reader-view-sync-target view) (plist-get section :id))
+      (code-reader-sync--show-in-explanation view section window))))
+
+(defun code-reader-sync-place-view (view)
+  "Place VIEW's explanation after a new explanation arrived.
+The pane shows the highlighted section.  With no highlighted section, it is
+placed by the source's middle line, as for any scroll of the source."
+  (let* ((id (code-reader-view-active-section-id view))
+         (section (and id (code-reader-session-section-by-id view id)))
+         (window (code-reader-ui-explanation-window view)))
+    (if (and section (window-live-p window))
+        (progn
+          (setf (code-reader-view-sync-target view) id)
+          (code-reader-sync--show-in-explanation view section window))
+      (code-reader-sync-refresh-view view))))
+
+(defun code-reader-sync-enter-explanation (view)
+  "Put the explanation cursor on the highlighted section when the reader enters the pane.
+The highlight follows the source cursor, so entering the pane lands on the lines
+the reader is working on.  The pane is scrolled only when that section is out of
+view.  Does nothing when no section is highlighted."
+  (let* ((id (code-reader-view-active-section-id view))
+         (section (and id (code-reader-session-section-by-id view id)))
+         (marker (plist-get section :exp-start))
+         (window (code-reader-ui-explanation-window view)))
+    (when (and (window-live-p window) (markerp marker) (marker-position marker))
+      (let ((heading (marker-position marker)))
+        (unless (code-reader-ui--point-in-window-p heading window)
+          (code-reader-sync--show-in-explanation view section window))
+        (set-window-point window heading)
+        (with-current-buffer (window-buffer window)
+          (goto-char heading))))))
 
 ;;; Helpers
 
@@ -129,7 +176,9 @@ pane does not drive the source pane while it shows that text."
                (markerp end) (marker-position end))
       (code-reader-highlight-set-active (code-reader-view-explanation-buffer view)
                                         (marker-position start) (marker-position end))
-      (setf (code-reader-view-active-section-id view) (plist-get section :id)))))
+      (setf (code-reader-view-active-section-id view) (plist-get section :id))
+      ;; The question box is about the highlighted section, so it follows the highlight.
+      (code-reader-chat-refresh view))))
 
 (defun code-reader-sync--set-top (window position &optional move-point)
   "Scroll WINDOW so POSITION is its first line; return the new window start.
@@ -146,8 +195,8 @@ otherwise be off screen.  The source pane never passes MOVE-POINT."
   "Scroll explanation WINDOW so that SECTION's heading is at the top."
   (let ((marker (plist-get section :exp-start)))
     (when (and (markerp marker) (marker-position marker))
-      (setf (code-reader-view-synced-exp-start view)
-            (code-reader-sync--set-top window (marker-position marker) t)))))
+      (code-reader-sync--set-top window (marker-position marker) t)
+      (code-reader-session-note-explanation view window))))
 
 (defun code-reader-sync--show-in-source (view section window)
   "Scroll source WINDOW so SECTION starts at its top and highlight its lines.
@@ -188,23 +237,30 @@ Used after a new result.  Forces the placement even if the source has not moved.
               (code-reader-sync--show-in-explanation view section explanation-window))))))))
 
 (defun code-reader-sync-explanation-scrolled (view)
-  "B: scroll VIEW's source pane to the section atop the explanation pane."
+  "B: scroll VIEW's source pane to the section atop the explanation pane.
+A change of the explanation pane's size is a layout effect, not a scroll.  It
+only records the pane's state; see `code-reader-session-settle-explanation'."
   (let ((source-window (code-reader-ui-source-window view))
         (explanation-window (code-reader-ui-explanation-window view)))
-    (when (and source-window explanation-window
-               (not (eql (window-start explanation-window)
-                         (code-reader-view-synced-exp-start view))))
-      (let* ((top (window-start explanation-window))
-             (id (code-reader-sync--section-id-at
-                  (code-reader-view-explanation-buffer view) top))
-             (section (and id (code-reader-session-section-by-id view id))))
-        ;; The explanation highlight stays on the section that holds the source
-        ;; point (C).  Only the source pane and its range move here, so the
-        ;; highlight never disagrees with where the cursor is.
-        (when section
-          (unless (equal id (code-reader-view-sync-target view))
-            (setf (code-reader-view-sync-target view) id)
-            (code-reader-sync--show-in-source view section source-window)))))))
+    (when (and source-window explanation-window)
+      (cond
+       ((not (equal (code-reader-session-window-size explanation-window)
+                    (code-reader-view-synced-exp-size view)))
+        (code-reader-session-note-explanation view explanation-window))
+       ((not (eql (window-start explanation-window)
+                  (code-reader-view-synced-exp-start view)))
+        (code-reader-session-note-explanation view explanation-window)
+        (let* ((top (window-start explanation-window))
+               (id (code-reader-sync--section-id-at
+                    (code-reader-view-explanation-buffer view) top))
+               (section (and id (code-reader-session-section-by-id view id))))
+          ;; The explanation highlight stays on the section that holds the source
+          ;; point (C).  Only the source pane and its range move here, so the
+          ;; highlight never disagrees with where the cursor is.
+          (when section
+            (unless (equal id (code-reader-view-sync-target view))
+              (setf (code-reader-view-sync-target view) id)
+              (code-reader-sync--show-in-source view section source-window)))))))))
 
 ;;; D: click or RET in the explanation pane
 
@@ -220,6 +276,11 @@ The layout is kept, and focus stays in the explanation pane."
     (with-current-buffer source
       (goto-char start))
     (when window
+      ;; The source window is usually not selected here, because the jump starts in
+      ;; the explanation pane, and a window keeps its own point.  Set it first:
+      ;; selecting the window for `recenter' would otherwise put the buffer's point
+      ;; back where the window had it.
+      (set-window-point window start)
       (with-selected-window window
         (recenter))
       (setf (code-reader-view-synced-source-start view) (window-start window)))

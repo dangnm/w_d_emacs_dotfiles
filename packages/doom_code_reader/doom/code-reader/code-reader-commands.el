@@ -14,6 +14,7 @@
 (require 'code-reader-session)
 (require 'code-reader-ui)
 (require 'code-reader-sync)
+(require 'code-reader-cache)
 
 ;; Customization variables are defined in code-reader.el.
 (defvar code-reader-python-command)
@@ -42,6 +43,11 @@ skipped in the source buffer, which is where point moves."
                         (code-reader-view-explanation-buffer view)))
     (with-current-buffer buffer
       (add-hook 'post-command-hook #'code-reader-sync--post-command nil t)
+      (add-hook 'post-command-hook #'code-reader-guide--post-command nil t)))
+  ;; The bottom panel shows the key table or the question box.  Selecting the panel
+  ;; runs its hook in whichever of the two buffers the panel showed, so both need it.
+  (dolist (buffer (list (code-reader-chat--ensure-buffer view) (code-reader-guide--buffer)))
+    (with-current-buffer buffer
       (add-hook 'post-command-hook #'code-reader-guide--post-command nil t))))
 
 (defun code-reader-commands--existing-view ()
@@ -78,14 +84,20 @@ skipped in the source buffer, which is where point moves."
 
 (defun code-reader-commands--explain (task start-line end-line note)
   "Request an explanation of TASK for START-LINE..END-LINE in this file buffer.
-NOTE, when non-nil, is shown in the header.  The request uses point."
+NOTE, when non-nil, is shown in the header.  The request uses point.
+A saved whole-file explanation is shown from its file, and the engine is not
+started.  The engine runs for a new explanation (g), and for questions."
   (unless buffer-file-name
     (user-error "Code Reader: this buffer is not visiting a file"))
-  (code-reader-commands--check-environment)
-  (let ((view (code-reader-session-view-for (current-buffer))))
+  (let* ((view (code-reader-session-view-for (current-buffer)))
+         (saved (and (equal task "explain_file") (code-reader-cache-find view))))
+    (unless saved
+      (code-reader-commands--check-environment))
     (code-reader-commands--show view)
-    (code-reader-session-explain view task start-line end-line (point)
-                                 :note note)))
+    (if saved
+        (code-reader-session-show-cached view (code-reader-cache-event saved))
+      (code-reader-session-explain view task start-line end-line (point)
+                                   :note note))))
 
 (defun code-reader-commands--defun-lines ()
   "Return (START-LINE . END-LINE) of the function containing point, or nil.
@@ -127,7 +139,8 @@ opens keep the explanation already on screen; press `g' to regenerate it."
 (defun code-reader-explain-file ()
   "Explain the whole current file with Claude, in the explanation pane.
 The explanation covers every line, so scroll the source to find the part you
-need.  The engine caches the result until the file changes."
+need.  A saved explanation of the file is shown without starting the engine; press
+`g' to explain the file again."
   (interactive)
   (let ((lines (code-reader-session-whole-file-lines (current-buffer))))
     (code-reader-commands--explain "explain_file" (car lines) (cdr lines) nil)))
@@ -176,10 +189,84 @@ say so in the header."
   (unless (code-reader-session-cancel (code-reader-commands--existing-view))
     (message "Code Reader: nothing is running")))
 
+(defun code-reader-commands--refresh-prompt (view)
+  "Return the yes-or-no question that asks before VIEW's explanation is replaced."
+  (let ((path (code-reader-view-cache-path view)))
+    (format "Regenerate the explanation of %s? %s is replaced, and Claude is asked again. "
+            (file-name-nondirectory (code-reader-view-file view))
+            (if path (format "The saved file %s" path) "The explanation"))))
+
 (defun code-reader-refresh ()
-  "Request this view's explanation again, bypassing the engine cache."
+  "Explain this view's file again, bypassing the saved explanation and the engine cache.
+The saved file is replaced, so this asks first.  Questions asked about lines that
+the file still has are kept."
   (interactive)
-  (code-reader-session-refresh (code-reader-commands--existing-view)))
+  (let ((view (code-reader-commands--existing-view)))
+    (unless (code-reader-view-task view)
+      (user-error "Code Reader: nothing to refresh yet"))
+    (if (y-or-n-p (code-reader-commands--refresh-prompt view))
+        (code-reader-session-refresh view)
+      (message "Code Reader: explanation kept"))))
+
+(defun code-reader-refresh-section ()
+  "Explain the highlighted section again, and leave the rest of the explanation as it is."
+  (interactive)
+  (code-reader-session-refresh-section (code-reader-commands--existing-view)))
+
+(defun code-reader-copy-cache-path ()
+  "Show the cache file of the explanation on screen, and copy its path.
+The path goes to the kill ring and to the system clipboard, so it can be pasted
+elsewhere.  The file is the explanation as an Org document."
+  (interactive)
+  (let* ((view (code-reader-commands--existing-view))
+         (path (code-reader-view-cache-path view)))
+    (unless path
+      (user-error "Code Reader: this explanation has no cache file"))
+    (kill-new path)
+    (code-reader-commands--copy-to-clipboard path)
+    (message "Code Reader: %s (copied)" path)))
+
+(defun code-reader-commands--copy-to-clipboard (text)
+  "Put TEXT on the system clipboard: through the window system, or with pbcopy."
+  (cond ((display-graphic-p) (gui-set-selection 'CLIPBOARD text))
+        ((executable-find "pbcopy")
+         (with-temp-buffer
+           (insert text)
+           (call-process-region (point-min) (point-max) "pbcopy")))))
+
+(defun code-reader-commands--question-at-point ()
+  "Return a plist (:created :text :section) for the question at point, or nil.
+Point is on a question when the nearest heading is a \"** Question:\" heading of the
+explanation.  CREATED is its CREATED time, which identifies it to the engine."
+  (save-excursion
+    (condition-case nil
+        (progn
+          (org-back-to-heading t)
+          (when (equal (org-entry-get nil "KIND") "question")
+            (let ((created (org-entry-get nil "CREATED"))
+                  (heading (org-get-heading t t t t)))
+              (org-up-heading-safe)
+              (when created
+                (list :created created
+                      :text (string-trim (replace-regexp-in-string "\\`Question: *" "" heading))
+                      :section (org-entry-get nil "SECTION_ID"))))))
+      (error nil))))
+
+(defun code-reader-delete-question ()
+  "Delete the question at point from the explanation and its saved file, after asking.
+Point must be on a \"** Question:\" heading, or in its text.  It cannot be undone."
+  (interactive)
+  (let* ((view (code-reader-commands--existing-view))
+         (question (code-reader-commands--question-at-point)))
+    (unless question
+      (user-error "Code Reader: point is not on a question"))
+    (let ((section (code-reader-session-section-by-id view (plist-get question :section))))
+      (unless section
+        (user-error "Code Reader: that question's section is no longer in the explanation"))
+      (if (y-or-n-p (format "Delete the question \"%s\"? It is removed from the saved file, and cannot be undone. "
+                            (truncate-string-to-width (plist-get question :text) 60 nil nil "...")))
+          (code-reader-session-delete-question view section (plist-get question :created))
+        (message "Code Reader: question kept")))))
 
 (defun code-reader-toggle-panel ()
   "Show or hide the explanation pane.  The explanation is kept while hidden."
@@ -195,9 +282,11 @@ say so in the header."
   (code-reader-ui-close (code-reader-commands--existing-view)))
 
 (defun code-reader-clear-cache ()
-  "Ask the engine to delete its cached explanations."
+  "Delete every saved explanation, in every project.  This asks first, because it cannot be undone."
   (interactive)
-  (code-reader-commands--send-when-connected '(:type "clear_cache")))
+  (if (y-or-n-p "Delete ALL saved explanations, in every project? This cannot be undone. ")
+      (code-reader-commands--send-when-connected '(:type "clear_cache"))
+    (message "Code Reader: nothing deleted")))
 
 (defun code-reader-reset-session ()
   "Forget the Claude session the engine keeps for the current project."

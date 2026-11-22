@@ -13,17 +13,37 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from engine import protocol
 from engine.cache import ExplanationCache, make_key
+from datetime import datetime, timezone
+
 from engine.claude.cli import build_argv, build_env, dump_schema, locate_claude, run_claude
 from engine.claude.session import SessionStore
 from engine.config import ENGINE_VERSION, PROGRESS_INTERVAL_S, EngineConfig
 from engine.context.collector import ContextPackage, collect_context
-from engine.models.request import BadRequest, ExplainRequest, parse_explain
-from engine.models.response import InvalidResponse, normalize_output, parse_structured
-from engine.models.schema import EXPLANATION_SCHEMA
+from engine.models.request import (
+    DELETE_QUESTION_TASK,
+    FOLLOW_UP_TASK,
+    SECTION_TASK,
+    WHOLE_FILE_TASK,
+    BadRequest,
+    ExplainRequest,
+    parse_explain,
+)
+from engine.models.response import (
+    InvalidResponse,
+    normalize_answer,
+    normalize_output,
+    normalize_section_explanation,
+    parse_structured,
+)
+from engine.models.schema import EXPLANATION_SCHEMA, FOLLOW_UP_SCHEMA, SECTION_EXPLANATION_SCHEMA
+from engine.org import Document, DocumentError, Question, Section, document_from_payload
+from engine.org import parse as parse_document
+from engine.org import render as render_document
 from engine.prompts import build_system_prompt, build_user_prompt, prompt_fingerprint
 from engine.requests import REASON_CLIENT, DuplicateRequest, RequestRegistry
 
@@ -153,6 +173,15 @@ class Orchestrator:
     # -- pipeline ----------------------------------------------------------
 
     async def _run(self, req: ExplainRequest, emit: Emit) -> None:
+        if req.task == FOLLOW_UP_TASK:
+            await self._run_follow_up(req, emit)
+            return
+        if req.task == SECTION_TASK:
+            await self._run_section_refresh(req, emit)
+            return
+        if req.task == DELETE_QUESTION_TASK:
+            await self._run_delete_question(req, emit)
+            return
         started = time.monotonic()
         await emit(protocol.progress(req.id, "building_context", 0, 0))
         ctx = collect_context(req)
@@ -160,12 +189,16 @@ class Orchestrator:
         system_prompt = build_system_prompt(req.explain_language)
         user_prompt = build_user_prompt(req.task, _prompt_values(req, ctx))
         model = req.model or self._config.claude_model
+        # The source text is deliberately not part of the key: an explanation stays
+        # until it is regenerated (use_cache false), even after the file is edited.
         key = make_key(
             {
                 "context_version": CONTEXT_VERSION,
-                "snapshot_hash": ctx.snapshot_hash,
                 "task": req.task,
-                "target": [req.target.start_line, req.target.end_line],
+                # A whole-file explanation is keyed by "the whole file", not by its line
+                # count, so an edit that adds lines keeps the cached explanation.
+                "target": (["whole_file"] if req.task == WHOLE_FILE_TASK
+                           else [req.target.start_line, req.target.end_line]),
                 "symbol": req.symbol,
                 "explain_language": req.explain_language,
                 "model": model,
@@ -176,10 +209,11 @@ class Orchestrator:
         )
 
         if req.use_cache:
-            cached = self._cache.get(key)
-            if cached is not None:
+            stored = self._load(req, key)
+            if stored is not None:
                 log.info("request %s served from cache", req.id)
-                await emit(self._result_message(req, ctx, cached, cache_hit=True, session_id=None,
+                path, text, doc = stored
+                await emit(self._result_message(req, ctx, key, path, text, doc, cache_hit=True, session_id=None,
                                                 cost_usd=None, duration_ms=0))
                 return
 
@@ -208,12 +242,221 @@ class Orchestrator:
         except InvalidResponse as exc:
             raise EngineError("invalid_response", str(exc), retryable=True) from exc
 
-        payload_dict = payload.to_dict()
-        if payload.sections:
-            self._cache.put(key, payload_dict)
-        await emit(self._result_message(req, ctx, payload_dict, cache_hit=False, session_id=call.session_id,
+        # The client reads the model from this header to decide whether a saved
+        # explanation matches its settings, so it is the request's model, not the CLI's.
+        doc = document_from_payload(payload.to_dict(), file=req.file_relpath,
+                                    project=str(req.project_root), key=key,
+                                    model=req.model or "default")
+        if ctx.truncated:
+            doc.warnings.append({
+                "code": "context_truncated",
+                "message": "the source context was trimmed to fit; some surrounding code is not shown",
+                "section_id": None,
+            })
+        # A full refresh keeps the questions the reader asked before it, as the
+        # sections they belong to. The file is read again here, after the call, so
+        # a question added while Claude was working is kept too.
+        previous = self._load(req, key)
+        if previous is not None:
+            _carry_questions(previous[2], doc)
+        text = render_document(doc)
+        path = self._cache.location(str(req.project_root), req.file_relpath,
+                                    _scope(req), req.explain_language, key)
+        if doc.sections:
+            self._cache.put(path, text)
+        await emit(self._result_message(req, ctx, key, path if path.exists() else None, text, doc,
+                                        cache_hit=False, session_id=call.session_id,
                                         session_resumed=call.resumed, cost_usd=call.cost_usd,
                                         duration_ms=call.duration_ms))
+
+    def _load(self, req: ExplainRequest, key: str) -> tuple[Path, str, Document] | None:
+        """Return the file, its Org text and the parsed document for KEY, or None."""
+        found = self._cache.locate(str(req.project_root), req.file_relpath, key)
+        if found is None:
+            return None
+        path, text = found
+        try:
+            return path, text, parse_document(text)
+        except DocumentError:
+            log.warning("discarding unreadable explanation %s", key[:12])
+            return None
+
+    def _locate_section(self, req: ExplainRequest) -> tuple[Path, str, Document, Section]:
+        """Return the stored explanation that a follow-up or refresh changes, and its section.
+
+        Raises ``explanation_missing`` when the explanation is no longer cached
+        (for example after ``clear_cache``) or no longer has that section.
+        """
+        stored = self._load(req, req.explanation_key or "")
+        if stored is None:
+            raise EngineError("explanation_missing",
+                              "this explanation is no longer cached; press g to explain the file again")
+        path, text, doc = stored
+        section = doc.find_section(req.target.start_line, req.target.end_line)
+        if section is None:
+            raise EngineError("explanation_missing",
+                              "that section is no longer in the explanation; press g to explain the file again")
+        return path, text, doc, section
+
+    def _edit_section(self, req: ExplainRequest,
+                      change: Callable[[Section], None]) -> tuple[Path, str, Document, Section]:
+        """Apply CHANGE to the section of the stored explanation, and store the result."""
+        path, _text, doc, section = self._locate_section(req)
+        change(section)
+        text = render_document(doc)
+        self._cache.put(path, text)
+        return path, text, doc, section
+
+    async def _ask_model(self, req: ExplainRequest, emit: Emit, task: str,
+                         schema: dict[str, Any]) -> tuple[ContextPackage, _CallResult]:
+        """Run one model call for a section-level task: a question or a section refresh.
+
+        These calls are never served from the explanation cache. They share the
+        project's Claude session for the language, so they can use the explanation
+        already given.
+        """
+        started = time.monotonic()
+        await emit(protocol.progress(req.id, "building_context", 0, 0))
+        ctx = collect_context(req)
+        system_prompt = build_system_prompt(req.explain_language)
+        user_prompt = build_user_prompt(task, _prompt_values(req, ctx))
+        model = req.model or self._config.claude_model
+        claude_path = locate_claude(self._config.claude_bin)
+        if claude_path is None:
+            raise EngineError("claude_not_found", "the Claude Code CLI could not be found", retryable=False)
+
+        lock = self._sessions.lock_for(str(req.project_root))
+        if lock.locked():
+            self._registry.set_phase(req.id, "queued")
+            await emit(protocol.progress(req.id, "queued", _elapsed(started), 0))
+        async with lock:
+            self._registry.set_phase(req.id, "running")
+            call = await self._call_with_progress(req, ctx, system_prompt, user_prompt, model, claude_path,
+                                                  emit, started, schema=schema)
+
+        self._registry.set_phase(req.id, "validating")
+        await emit(protocol.progress(req.id, "validating", _elapsed(started), 0))
+        return ctx, call
+
+    async def _run_follow_up(self, req: ExplainRequest, emit: Emit) -> None:
+        """Answer one question about a section, and add the answer under that section.
+
+        The answer becomes a nested heading in the explanation's document, so the
+        reader can fold it away.
+        """
+        self._locate_section(req)  # fail before a model call when the section is gone
+        ctx, call = await self._ask_model(req, emit, FOLLOW_UP_TASK, FOLLOW_UP_SCHEMA)
+        try:
+            answer = normalize_answer(call.structured)
+        except InvalidResponse as exc:
+            raise EngineError("invalid_response", str(exc), retryable=True) from exc
+
+        entry = Question(question=req.question or "", answer=answer, created_at=_timestamp())
+        path, text, doc, _section = self._edit_section(req, lambda section: section.followups.append(entry))
+        await emit(self._followup_message(req, ctx, entry, call, path, text, doc))
+
+    async def _run_section_refresh(self, req: ExplainRequest, emit: Emit) -> None:
+        """Explain one section's lines again, and make that the section's explanation.
+
+        Only the section changes. Its old questions are removed, because they were
+        asked about the text that is being replaced. A full refresh (use_cache
+        false) of the whole explanation replaces every section.
+        """
+        self._locate_section(req)
+        ctx, call = await self._ask_model(req, emit, SECTION_TASK, SECTION_EXPLANATION_SCHEMA)
+        try:
+            explanation = normalize_section_explanation(call.structured)
+        except InvalidResponse as exc:
+            raise EngineError("invalid_response", str(exc), retryable=True) from exc
+
+        refreshed_at = _timestamp()
+
+        def reset(section: Section) -> None:
+            section.explanation = explanation
+            section.followups = []
+            section.refreshed_at = refreshed_at
+
+        path, text, doc, section = self._edit_section(req, reset)
+        await emit(self._section_message(req, ctx, section, call, path, text, doc))
+
+    async def _run_delete_question(self, req: ExplainRequest, emit: Emit) -> None:
+        """Remove one question from its section in the stored explanation. No model call is made.
+
+        The question is found by its CREATED time. When it is no longer there, nothing
+        is written and the request fails with ``explanation_missing``.
+        """
+        def drop(section: Section) -> None:
+            for index, entry in enumerate(section.followups):
+                if entry.created_at == req.question_at:
+                    del section.followups[index]
+                    return
+            raise EngineError("explanation_missing", "that question is no longer in the explanation")
+
+        path, text, doc, _section = self._edit_section(req, drop)
+        await emit(self._delete_message(req, path, text, doc))
+
+    def _delete_message(self, req: ExplainRequest, path: Path, text: str, doc: Document) -> dict[str, Any]:
+        return {
+            "type": "result",
+            "id": req.id,
+            "view": req.view,
+            "task": DELETE_QUESTION_TASK,
+            "file": req.file_relpath,
+            "explain_language": req.explain_language,
+            "target": {"start_line": req.target.start_line, "end_line": req.target.end_line},
+            "explanation_key": req.explanation_key,
+            "question_at": req.question_at,
+            "cache_path": str(path),
+            "document": text,
+            "sections": _section_dicts(doc),
+        }
+
+    def _section_message(self, req: ExplainRequest, ctx: ContextPackage, section: Section,
+                         call: _CallResult, path: Path, text: str, doc: Document) -> dict[str, Any]:
+        return {
+            "type": "result",
+            "id": req.id,
+            "view": req.view,
+            "task": SECTION_TASK,
+            "file": req.file_relpath,
+            "snapshot_hash": ctx.snapshot_hash,
+            "explain_language": req.explain_language,
+            "target": {"start_line": req.target.start_line, "end_line": req.target.end_line},
+            "explanation_key": req.explanation_key,
+            "cache_path": str(path),
+            "explanation": section.explanation,
+            "created_at": section.refreshed_at,
+            "document": text,
+            "sections": _section_dicts(doc),
+            "session_id": call.session_id,
+            "session_resumed": call.resumed,
+            "cost_usd": call.cost_usd,
+            "duration_ms": call.duration_ms,
+        }
+
+    def _followup_message(self, req: ExplainRequest, ctx: ContextPackage, entry: Question,
+                          call: _CallResult, path: Path, text: str, doc: Document) -> dict[str, Any]:
+        return {
+            "type": "result",
+            "id": req.id,
+            "view": req.view,
+            "task": FOLLOW_UP_TASK,
+            "file": req.file_relpath,
+            "snapshot_hash": ctx.snapshot_hash,
+            "explain_language": req.explain_language,
+            "target": {"start_line": req.target.start_line, "end_line": req.target.end_line},
+            "explanation_key": req.explanation_key,
+            "cache_path": str(path),
+            "question": entry.question,
+            "answer": entry.answer,
+            "created_at": entry.created_at,
+            "document": text,
+            "sections": _section_dicts(doc),
+            "session_id": call.session_id,
+            "session_resumed": call.resumed,
+            "cost_usd": call.cost_usd,
+            "duration_ms": call.duration_ms,
+        }
 
     async def _call_with_progress(
         self,
@@ -225,6 +468,7 @@ class Orchestrator:
         claude_path: str,
         emit: Emit,
         started: float,
+        schema: dict = EXPLANATION_SCHEMA,
     ) -> _CallResult:
         """Run the CLI while a ticker emits progress; cancels the ticker on exit."""
         chars = {"value": 0}
@@ -239,7 +483,8 @@ class Orchestrator:
 
         ticking = asyncio.create_task(ticker())
         try:
-            return await self._call_claude(req, system_prompt, user_prompt, model, claude_path, on_progress)
+            return await self._call_claude(req, system_prompt, user_prompt, model, claude_path, on_progress,
+                                           schema=schema)
         finally:
             ticking.cancel()
 
@@ -251,15 +496,16 @@ class Orchestrator:
         model: str | None,
         claude_path: str,
         on_progress: Callable[[Any], None],
+        schema: dict = EXPLANATION_SCHEMA,
     ) -> _CallResult:
         """Call the CLI, recovering from stale or in-use sessions (at most a few retries)."""
         root = str(req.project_root)
-        schema = dump_schema(EXPLANATION_SCHEMA)
+        schema_text = dump_schema(schema)
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             ref = self._sessions.ensure(root, req.explain_language)
             argv = build_argv(
                 claude_path,
-                json_schema=schema,
+                json_schema=schema_text,
                 system_prompt=system_prompt,
                 session_id=ref.session_id,
                 resume=ref.resume,
@@ -332,7 +578,10 @@ class Orchestrator:
         self,
         req: ExplainRequest,
         ctx: ContextPackage,
-        payload: dict[str, Any],
+        key: str,
+        cache_path: Path | None,
+        text: str,
+        doc: Document,
         *,
         cache_hit: bool,
         session_id: str | None,
@@ -340,15 +589,6 @@ class Orchestrator:
         duration_ms: int,
         session_resumed: bool | None = None,
     ) -> dict[str, Any]:
-        warnings = list(payload.get("warnings", []))
-        if ctx.truncated:
-            warnings.append(
-                {
-                    "code": "context_truncated",
-                    "message": "the source context was trimmed to fit; some surrounding code is not shown",
-                    "section_id": None,
-                }
-            )
         return {
             "type": "result",
             "id": req.id,
@@ -359,12 +599,16 @@ class Orchestrator:
             "cache_hit": cache_hit,
             "explain_language": req.explain_language,
             "target": {"start_line": req.target.start_line, "end_line": req.target.end_line},
-            "summary": payload.get("summary", ""),
-            "sections": payload.get("sections", []),
-            "dependencies": payload.get("dependencies", []),
-            "data_flow": payload.get("data_flow", []),
-            "notes": payload.get("notes", []),
-            "warnings": warnings,
+            "explanation_key": key,
+            # None when the explanation has no file (it had no sections).
+            "cache_path": str(cache_path) if cache_path is not None else None,
+            "document": text,
+            "summary": doc.summary,
+            "sections": _section_dicts(doc),
+            "dependencies": doc.dependencies,
+            "data_flow": doc.data_flow,
+            "notes": doc.notes,
+            "warnings": doc.warnings,
             "session_id": session_id,
             "session_resumed": session_resumed,
             "cost_usd": cost_usd,
@@ -393,8 +637,48 @@ def _prompt_values(req: ExplainRequest, ctx: ContextPackage) -> dict[str, str]:
         "window_end": str(ctx.window_end),
         "total_lines": str(ctx.total_lines),
         "truncated_note": truncated_note,
+        "question": req.question or "",
         "snippet": ctx.numbered_snippet,
     }
+
+
+def _scope(req: ExplainRequest) -> str:
+    """Return the scope part of an explanation's file name: the whole file, or its lines."""
+    if req.task == WHOLE_FILE_TASK:
+        return "whole-file"
+    return f"lines-{req.target.start_line}-{req.target.end_line}"
+
+
+def _section_dicts(doc: Document) -> list[dict[str, Any]]:
+    """Describe each section for the client: its lines, text and questions."""
+    return [
+        {
+            "id": section.id,
+            "source_start": section.source_start,
+            "source_end": section.source_end,
+            "title": section.title,
+            "explanation": section.explanation,
+            "followups": [
+                {"question": entry.question, "answer": entry.answer, "created_at": entry.created_at}
+                for entry in section.followups
+            ],
+            "refreshed_at": section.refreshed_at,
+        }
+        for section in doc.sections
+    ]
+
+
+def _carry_questions(previous: Document, doc: Document) -> None:
+    """Keep the questions of ``previous`` on the sections of ``doc`` that cover the same lines."""
+    for section in doc.sections:
+        old = previous.find_section(section.source_start, section.source_end)
+        if old is not None:
+            section.followups = list(old.followups)
+
+
+def _timestamp() -> str:
+    """Return the current UTC time, to the microsecond, so that later entries sort after earlier ones."""
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _elapsed(started: float) -> int:

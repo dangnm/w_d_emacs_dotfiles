@@ -18,6 +18,7 @@
 ;;   code-reader-ui.el          layout and explanation buffer
 ;;   code-reader-sync.el        synchronised scrolling and click-to-jump
 ;;   code-reader-guide.el       key guide shown under the explanation pane
+;;   code-reader-chat.el        question box under the explanation, follow-up answers
 ;;   code-reader-commands.el    interactive commands
 ;;
 ;; Key bindings are not defined here.  Bind the commands in your own
@@ -57,6 +58,8 @@
 (autoload 'code-reader-show-status "code-reader" nil t)
 ;;;###autoload
 (autoload 'code-reader-set-language "code-reader" nil t)
+;;;###autoload
+(autoload 'code-reader-copy-cache-path "code-reader" nil t)
 ;;;###autoload
 (autoload 'code-reader-shutdown-engine "code-reader" nil t)
 
@@ -130,6 +133,7 @@ key that may be exhausted."
 (require 'code-reader-ui)
 (require 'code-reader-sync)
 (require 'code-reader-guide)
+(require 'code-reader-chat)
 (require 'code-reader-commands)
 
 (provide 'code-reader)

@@ -28,8 +28,11 @@ Status: **Phase 1 (MVP)**. See [Roadmap](#roadmap).
   contract is in [PROTOCOL.md](PROTOCOL.md).
 - Each project gets its own Claude session, so follow-up explanations reuse
   context. Sessions are resumed with `--resume`.
-- Explanations are cached on disk, keyed by snapshot hash, task, target,
-  language, model, and prompt version. Editing a prompt invalidates old entries.
+- Each explanation is an Org document, cached on disk under a key made from task,
+  target, language, model, and prompt version. The cache file is the document the
+  right pane shows. It stays until you press `g`: editing the source does not expire
+  it. A change to a prompt applies when you next press `g`. See [Where explanations are
+  stored](#where-explanations-are-stored) for the folder layout.
 
 ## Requirements
 
@@ -61,18 +64,41 @@ All settings live in the `code-reader` customize group (`M-x customize-group`):
 | `code-reader-model` | `nil` | model alias for the CLI (`nil` = CLI default) |
 | `code-reader-effort` | `"low"` | reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`). Low is several times faster and cheaper. Run `code-reader-shutdown-engine` after changing it |
 | `code-reader-claude-env-remove` | `("ANTHROPIC_API_KEY")` | variables removed before calling `claude` |
-| `code-reader-state-directory` | `~/.cache/doom-code-reader/` | cache, sessions, logs |
+| `code-reader-state-directory` | `~/.cache/doom-code-reader/` | cache, sessions, logs (see [Where explanations are stored](#where-explanations-are-stored)) |
 
 `code-reader-claude-env-remove` defaults to dropping `ANTHROPIC_API_KEY`. The
 CLI then uses your claude.ai login. An exhausted or invalid key in the shell
 would otherwise make every request fail with "Credit balance is too low".
 Set the list to `nil` to use the key instead.
 
+### Where explanations are stored
+
+Explanations live in `cache/` under the state directory, one folder per project.
+Inside it, the folder tree follows the source file's path in the project:
+
+```
+cache/
+└── dotfiles-3f9a2c/                          project folder: name + short hash of its root path
+    └── packages/doom_code_reader/engine/
+        └── protocol.py/                      the source file, at its path in the project
+            ├── whole-file-English-a1b2c3d4.org
+            └── lines-12-20-English-9e8f7a6b.org
+```
+
+Each `.org` file is one explanation, as an Org document. Its header names the project
+(`#+PROJECT:`) and the full cache key (`#+KEY:`). The eight characters in the file name
+are the start of that key. The engine checks the full key before it uses a file.
+Press `p` in the explanation pane to show the file's path and copy it to the clipboard.
+Opening a file reads its saved explanation directly, so the engine does not start for
+it. The engine starts only when Claude is needed: for a new explanation (`g`), a
+question, or a section refresh. `code-reader-clear-cache` removes every explanation, in every project, after asking
+yes or no.
+
 ## Usage
 
 | Key | Command | What it does |
 |---|---|---|
-| `SPC c r` | `code-reader-open` | open the two-pane view and explain the whole file (first open only) |
+| `SPC c r` | `code-reader-open` | open the two-pane view. If the file has a saved explanation, it is shown and the engine is not started; otherwise the whole file is explained |
 | `SPC c b` | `code-reader-explain-block` | explain the active region |
 | `SPC c F` | `code-reader-explain-function` | explain the function at point |
 
@@ -83,13 +109,35 @@ reopening is instant. Press `g` to regenerate after the file changes. Files over
 300 000 characters are rejected with a message. Explain a region or function
 instead.
 
+**Reading the explanation.** The right pane is an Org buffer. Each section is a
+heading, and the sections start folded. `TAB` folds and unfolds the section at
+point, and `S-TAB` folds or unfolds all of them.
+
+**Asking about a section.** Under the explanation pane is a question box. Its
+header shows the lines it is about: the section highlighted in the explanation,
+which is the section that holds the source point. Type a question and press
+`RET`. The answer is added to the explanation as a heading nested under that
+section, `** Question: ...`, and the section opens to show it. The answer stays
+folded until you press `TAB` on the question. The question is kept in the cache
+file, so reopening the file shows it again. `a` in the explanation pane moves to
+the box. From the box, press `ESC` and then `C-w k` to
+go back. A question sends the file text and the section's lines, and Claude can
+read other files in the project to answer.
+
 `M-x code-reader-explain-file` runs the same whole-file explanation without
 opening the layout.
 
-In the explanation pane: `RET` or click jumps to the source, `g` refreshes
-(bypasses the cache), `c` cancels, `t` toggles the pane, `q` closes it.
+In the explanation pane: `RET` or click jumps to the source, `TAB` folds or
+unfolds a section, `g` refreshes (bypasses the cache; it asks yes or no first, because it replaces the saved file), `r` refreshes only the
+highlighted section (the lines the question box is about) and leaves the rest of
+the explanation as it is, `c` cancels, `p` shows the explanation's cache file and copies its path, `d` deletes the question
+at point after asking yes or no (it is removed from the saved file too), `t` toggles
+the pane, `q` closes it. A
+section refresh is kept with its section, so it survives later explanations until a
+full refresh (`g`) replaces the whole explanation. It also resets the section: its
+questions are removed from the explanation.
 Moving the cursor from the source into the explanation pane (`C-w l`, or a click)
-shows a small table of the pane's keys under it. The table goes away when the
+shows a small table of the pane's keys in a bottom panel under it. The panel also holds the question box: selecting the panel (`C-w j`, or `a`) clears the table and shows the box, ready to type. The panel is on screen only while the cursor is in it, or while the key table is up; otherwise the explanation takes the whole column. The table goes away when the
 cursor moves inside the pane, or when you move back to the source.
 
 Other commands (run with `M-x`): `code-reader-cancel`,
@@ -101,14 +149,19 @@ Closing the reader restores the original window layout.
 
 ### Scrolling and highlights
 
-- Scrolling the source moves the explanation pane to the section covering the
-  middle of the visible source. Point in the source does not move.
+- Scrolling the source with the mouse or scroll keys, without moving point, moves
+  the explanation pane to the section covering the middle of the visible source.
+  Point in the source does not move.
+- Moving point in the source marks the section that covers it with a fringe bar.
+  When point enters a different section, that section is placed at the top of the
+  explanation pane, even if it is already on screen, so the pane follows the cursor
+  line by line. Page keys usually move point too, and then they follow the cursor the same way.
+  This never calls Claude.
 - Scrolling the explanation pane brings the matching source region into view and
-  highlights it.
-- Moving point in the source highlights the section that covers it. This never
-  calls Claude.
-- Explanations are tied to the text they were generated from. If the buffer
-  changes, the header shows "stale". Press `g` to regenerate.
+  marks it with a bar in the left fringe.
+- Explanations stay until you press `g`. Editing the source does not expire them,
+  and the header does not change. Line numbers in an explanation refer to the text
+  when it was made, so press `g` after large edits.
 
 ## Security model
 
@@ -153,7 +206,7 @@ NDJSON messages with `nc -U PATH`.
 Run from this directory:
 
 ```sh
-# Engine: 90 tests, including real-socket and subprocess end-to-end tests.
+# Engine: 115 tests, including real-socket and subprocess end-to-end tests.
 # They use tests/fixtures/fake_claude.py, so no API calls are made.
 python3 -m unittest discover -s tests -t . -p 'test_*.py'
 
@@ -173,7 +226,7 @@ flag (the CLI's own default), the same file took about 100 seconds and roughly 3
 ## Layout
 
 ```
-engine/            Python daemon (protocol, orchestration, CLI adapter, cache)
+engine/            Python daemon (protocol, orchestration, CLI adapter, cache, org.py)
   claude/          CLI discovery, argv, runner, stream parser, session store
   context/         source window and numbering
   models/          request validation, response validation, JSON schema
@@ -188,12 +241,17 @@ PROTOCOL.md        wire contract between Emacs and the engine
 - **"the Claude Code CLI could not be found"**: set `code-reader-claude-command`.
 - **"Credit balance is too low"**: the API key in your environment is out of
   credit. Keep `code-reader-claude-env-remove` at its default, or fix the key.
-- **Explanation says "stale"**: the buffer changed after the explanation was made.
-  Press `g`.
+- **Line numbers in an explanation look wrong**: the file changed since the
+  explanation was made. Press `g` to regenerate it.
 - **Engine problems**: check `code-reader-state-directory/engine.log`, and the
   `*code-reader-engine*` buffer for stderr.
 - **Sessions behave oddly**: `code-reader-reset-session` forgets the Claude
   session for the current project.
+- **Explanations from before the Org format**: they were JSON, or sat in hash-named
+  folders. The engine ignores them. Questions asked before the change are not carried over. Run
+  `code-reader-clear-cache` to delete the old files, then press `g` to explain again.
+- **"explanation is no longer cached"**: the cache was cleared after the explanation
+  was shown. Press `g` to explain the file again.
 
 ## Roadmap
 

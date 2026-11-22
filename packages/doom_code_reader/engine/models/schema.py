@@ -4,6 +4,20 @@ from __future__ import annotations
 
 _STRING_LIST = {"type": "array", "items": {"type": "string"}}
 
+# One section's explanation, written again on its own (task "explain_section").
+SECTION_EXPLANATION_SCHEMA: dict = {
+    "type": "object",
+    "properties": {"explanation": {"type": "string"}},
+    "required": ["explanation"],
+}
+
+# Answer to a question about one section (task "follow_up").
+FOLLOW_UP_SCHEMA: dict = {
+    "type": "object",
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+}
+
 EXPLANATION_SCHEMA: dict = {
     "type": "object",
     "properties": {

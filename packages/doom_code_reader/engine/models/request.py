@@ -20,10 +20,19 @@ from engine.config import (
     MIN_TIMEOUT_S,
 )
 
-ALLOWED_TASKS = ("explain_file", "explain_block", "explain_function")
+ALLOWED_TASKS = ("explain_file", "explain_block", "explain_function", "follow_up", "explain_section",
+                 "delete_question")
+DELETE_QUESTION_TASK = "delete_question"  # remove one question from an explanation; no model call
+FOLLOW_UP_TASK = "follow_up"
+SECTION_TASK = "explain_section"  # explain one section again, on its own lines
+MAX_QUESTION_CHARS = 2000
 # explain_file always covers the whole file; the client's target is ignored.
 WHOLE_FILE_TASK = "explain_file"
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\]]{0,127}$")
+# An explanation's cache key (SHA-256 hex). It names a file, so it is checked strictly.
+_EXPLANATION_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
+# Tasks that change an explanation that already exists, so they need its key.
+_KEY_TASKS = (FOLLOW_UP_TASK, SECTION_TASK, DELETE_QUESTION_TASK)
 
 
 class BadRequest(Exception):
@@ -59,6 +68,11 @@ class ExplainRequest:
     use_cache: bool
     timeout: float
     model: str | None
+    question: str | None = None  # only for FOLLOW_UP_TASK
+    # The cache key of the explanation a follow-up, section refresh or deletion changes.
+    explanation_key: str | None = None
+    # The CREATED time of the question to delete (only for DELETE_QUESTION_TASK).
+    question_at: str | None = None
 
 
 def _require_str(msg: dict, key: str, *, max_len: int, allow_empty: bool = False) -> str:
@@ -142,6 +156,20 @@ def parse_explain(msg: dict) -> ExplainRequest:
         else:
             target = parse_target(msg.get("target"), total_lines)
 
+        question = None
+        if task == FOLLOW_UP_TASK:
+            question = _require_str(msg, "question", max_len=MAX_QUESTION_CHARS).strip()
+
+        question_at = None
+        if task == DELETE_QUESTION_TASK:
+            question_at = _require_str(msg, "question_at", max_len=64).strip()
+
+        explanation_key = None
+        if task in _KEY_TASKS:
+            explanation_key = _require_str(msg, "explanation_key", max_len=64).strip()
+            if not _EXPLANATION_KEY_RE.match(explanation_key):
+                raise BadRequest("'explanation_key' is not a valid explanation key")
+
         point_line = msg.get("point_line")
         if point_line is not None:
             point_line = _require_int(point_line, "point_line")
@@ -184,6 +212,9 @@ def parse_explain(msg: dict) -> ExplainRequest:
             use_cache=use_cache,
             timeout=timeout,
             model=model,
+            question=question,
+            explanation_key=explanation_key,
+            question_at=question_at,
         )
     except BadRequest as exc:
         if exc.request_id is None:

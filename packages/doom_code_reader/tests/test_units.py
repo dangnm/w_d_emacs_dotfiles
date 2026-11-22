@@ -7,18 +7,29 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from engine.cache import ExplanationCache, make_key
+from engine.cache import ExplanationCache, make_key, project_folder
 from engine.claude.cli import REQUIRED_FLAGS, build_argv, build_env, locate_claude, probe_claude
 from engine.claude.session import SessionStore
 from engine.claude.stream_parser import StreamParser
 from engine.config import DENIED_TOOLS, MAX_SNIPPET_CHARS, READ_ONLY_TOOLS
 from engine.context.collector import collect_context, render_numbered, split_lines
 from engine.models.request import BadRequest, Target, parse_explain
-from engine.models.response import InvalidResponse, normalize_output, parse_structured
+from engine.org import Document, DocumentError, Question, Section, document_from_payload
+from engine.org import parse as parse_document
+from engine.org import render as render_document
+from engine.models.response import (
+    InvalidResponse,
+    normalize_answer,
+    normalize_output,
+    normalize_section_explanation,
+    parse_structured,
+)
 from engine.prompts import PromptError, build_system_prompt, build_user_prompt, prompt_fingerprint, render
 from tests.helpers import FAKE_CLAUDE, explain_message, make_project
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+# A well-formed explanation key. The engine checks only its shape, not that it is cached.
+KEY = "a" * 64
 
 
 class StreamParserTests(unittest.TestCase):
@@ -463,20 +474,222 @@ class SessionStoreTests(unittest.TestCase):
         self.assertEqual(store.snapshot()[0]["language"], "English")
 
 
-class CacheTests(unittest.TestCase):
+class FollowUpRequestTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.cache = ExplanationCache(Path(self._tmp.name) / "cache")
+        base = Path(self._tmp.name).resolve()
+        self.root = base / "project"
+        self.root.mkdir()
+        self.source = make_project(self.root)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def test_round_trip(self) -> None:
+    def test_follow_up_is_parsed_with_its_question_and_section(self) -> None:
+        req = parse_explain(explain_message(self.root, self.source, task="follow_up", target=(2, 3),
+                                            question="  Explain more about this?  ", explanation_key=KEY))
+        self.assertEqual(req.task, "follow_up")
+        self.assertEqual(req.target, Target(2, 3))
+        self.assertEqual(req.question, "Explain more about this?")
+        self.assertEqual(req.explanation_key, KEY)
+
+    def test_follow_up_needs_a_question(self) -> None:
+        with self.assertRaises(BadRequest):
+            parse_explain(explain_message(self.root, self.source, task="follow_up", target=(2, 3),
+                                          question="   ", explanation_key=KEY))
+
+    def test_follow_up_target_must_be_inside_the_file(self) -> None:
+        with self.assertRaises(BadRequest):
+            parse_explain(explain_message(self.root, self.source, task="follow_up", target=(900, 901),
+                                          question="why?", explanation_key=KEY))
+
+    def test_follow_up_needs_the_explanation_key(self) -> None:
+        with self.assertRaises(BadRequest):
+            parse_explain(explain_message(self.root, self.source, task="follow_up", target=(2, 3),
+                                          question="why?"))
+
+    def test_explanation_key_must_be_a_cache_key(self) -> None:
+        # The key becomes a file name, so anything but 64 hex digits is refused.
+        for bad in ("../../etc/passwd", "A" * 64, "a" * 63, "g" * 64):
+            with self.subTest(bad=bad), self.assertRaises(BadRequest):
+                parse_explain(explain_message(self.root, self.source, task="follow_up", target=(2, 3),
+                                              question="why?", explanation_key=bad))
+
+    def test_delete_needs_the_question_time_and_explanation_key(self) -> None:
+        with self.assertRaises(BadRequest):
+            parse_explain(explain_message(self.root, self.source, task="delete_question", target=(2, 3),
+                                          explanation_key=KEY))
+        req = parse_explain(explain_message(self.root, self.source, task="delete_question", target=(2, 3),
+                                            explanation_key=KEY, question_at="2026-11-22T10:00:00.000001+00:00"))
+        self.assertEqual(req.question_at, "2026-11-22T10:00:00.000001+00:00")
+        self.assertEqual(req.explanation_key, KEY)
+
+    def test_other_tasks_carry_no_question(self) -> None:
+        req = parse_explain(explain_message(self.root, self.source, target=(1, 3), task="explain_block"))
+        self.assertIsNone(req.question)
+
+
+class OrgDocumentTests(unittest.TestCase):
+    @staticmethod
+    def _sample() -> Document:
+        return Document(
+            file="lisp/sample.el",
+            project="/home/me/dotfiles",
+            key="c" * 64,
+            model="default",
+            summary="A small file.",
+            sections=[
+                Section(
+                    id="abc-s1", source_start=1, source_end=2, title="Greet",
+                    explanation="Says hello.\n\nUses =message=.",
+                    followups=[Question("Why message?", "It prints.", "2026-11-22T10:00:00.000001+00:00")],
+                ),
+                Section(
+                    id="abc-s2", source_start=4, source_end=5, title="",
+                    explanation="Adds two numbers.",
+                    refreshed_at="2026-11-22T11:00:00.000001+00:00",
+                ),
+            ],
+            dependencies=["subr-x"],
+            warnings=[{"code": "empty_explanation", "message": "a section has no explanation", "section_id": None}],
+        )
+
+    def test_each_section_is_a_heading_with_its_questions_nested_under_it(self) -> None:
+        text = render_document(self._sample())
+        self.assertTrue(text.startswith("#+TITLE: lisp/sample.el\n"))
+        self.assertIn("\n* Lines 1–2 · Greet\n", text)
+        self.assertIn("\n** Question: Why message?\n", text)
+        self.assertIn("\n* Lines 4–5\n", text)
+        self.assertIn(":SECTION_ID: abc-s2\n", text)
+        self.assertIn(":REFRESHED: 2026-11-22T11:00:00.000001+00:00\n", text)
+
+    def test_parse_reads_back_what_render_wrote(self) -> None:
+        doc = self._sample()
+        self.assertEqual(parse_document(render_document(doc)), doc)
+
+    def test_text_from_the_model_cannot_start_a_heading_or_drawer(self) -> None:
+        hostile = "* Injected\n:END:\n** Question: fake\n#+TITLE: evil\n- item"
+        doc = Document(file="f.el", sections=[Section(id="x-s1", source_start=1, source_end=1,
+                                                       title="t", explanation=hostile)])
+        parsed = parse_document(render_document(doc))
+        self.assertEqual(parsed.file, "f.el")
+        self.assertEqual([s.id for s in parsed.sections], ["x-s1"])
+        self.assertEqual(parsed.sections[0].followups, [])
+        self.assertEqual(parsed.sections[0].explanation, hostile)
+
+    def test_text_that_is_not_an_explanation_is_rejected(self) -> None:
+        with self.assertRaises(DocumentError):
+            parse_document("* Something else\n  body\n")
+        summary_only = "* Summary\n  :PROPERTIES:\n  :KIND: summary\n  :END:\n  s\n"
+        self.assertEqual(parse_document(summary_only).summary, "s")
+        question_under_summary = summary_only + ("** Question: q\n   :PROPERTIES:\n   :KIND: question\n"
+                                                 "   :END:\n   a\n")
+        with self.assertRaises(DocumentError):
+            parse_document(question_under_summary)
+        with self.assertRaises(DocumentError):
+            parse_document("* Lines 1–2\n  :PROPERTIES:\n  :KIND: section\n  :END:\n  no id\n")
+        with self.assertRaises(DocumentError):
+            parse_document("* Summary\n  :PROPERTIES:\n  :KIND: summary\n  body\n")
+
+    def test_payload_becomes_sections_and_lists(self) -> None:
+        payload = {
+            "summary": "S",
+            "sections": [{"id": "x-s1", "source_start": 1, "source_end": 2, "title": "T", "explanation": "E"}],
+            "dependencies": ["d"],
+            "data_flow": [],
+            "notes": ["n"],
+            "warnings": [{"code": "range_out_of_bounds", "message": "m", "section_id": "x"}],
+        }
+        doc = document_from_payload(payload, file="a.el")
+        self.assertEqual(doc.sections[0].explanation, "E")
+        self.assertEqual(doc.dependencies, ["d"])
+        self.assertEqual(doc.warnings, [{"code": "range_out_of_bounds", "message": "m", "section_id": None}])
+        self.assertIsNotNone(doc.find_section(1, 2))
+        self.assertIsNone(doc.find_section(1, 3))
+
+
+class FollowUpAnswerTests(unittest.TestCase):
+    def test_answer_is_stripped_and_required(self) -> None:
+        self.assertEqual(normalize_answer({"answer": "  Yes. \n"}), "Yes.")
+        for bad in ({}, {"answer": ""}, {"answer": "   "}, {"answer": 3}):
+            with self.subTest(bad=bad), self.assertRaises(InvalidResponse):
+                normalize_answer(bad)
+
+
+class SectionRefreshTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name).resolve()
+        self.root = base / "project"
+        self.root.mkdir()
+        self.source = make_project(self.root)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_section_refresh_takes_its_lines_and_no_question(self) -> None:
+        req = parse_explain(explain_message(self.root, self.source, task="explain_section", target=(2, 4),
+                                            explanation_key=KEY))
+        self.assertEqual(req.task, "explain_section")
+        self.assertEqual(req.target, Target(2, 4))
+        self.assertEqual(req.explanation_key, KEY)
+        self.assertIsNone(req.question)
+
+    def test_section_refresh_needs_the_explanation_key(self) -> None:
+        with self.assertRaises(BadRequest):
+            parse_explain(explain_message(self.root, self.source, task="explain_section", target=(2, 4)))
+
+    def test_section_explanation_is_stripped_and_required(self) -> None:
+        self.assertEqual(normalize_section_explanation({"explanation": "  Adds two numbers.\n"}),
+                         "Adds two numbers.")
+        for bad in ({}, {"explanation": ""}, {"explanation": "   "}, {"explanation": 3}):
+            with self.subTest(bad=bad), self.assertRaises(InvalidResponse):
+                normalize_section_explanation(bad)
+
+
+class CacheTests(unittest.TestCase):
+    PROJECT = "/home/me/dotfiles"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "cache"
+        self.cache = ExplanationCache(self.root)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write(self, key: str, text: str, scope: str = "whole-file", file: str = "lisp/sample.el") -> Path:
+        path = self.cache.location(self.PROJECT, file, scope, "English", key)
+        self.cache.put(path, text)
+        return path
+
+    def test_round_trip_finds_the_document_by_its_key(self) -> None:
         key = make_key({"a": 1})
-        self.assertIsNone(self.cache.get(key))
-        self.cache.put(key, {"summary": "x", "sections": []})
-        self.assertEqual(self.cache.get(key)["summary"], "x")
+        self.assertIsNone(self.cache.locate(self.PROJECT, "lisp/sample.el", key))
+        text = f"#+TITLE: x\n#+KEY: {key}\n"
+        path = self._write(key, text)
+        self.assertEqual(self.cache.locate(self.PROJECT, "lisp/sample.el", key), (path, text))
         self.assertEqual(self.cache.count(), 1)
+        self.assertEqual(path.suffix, ".org")
+
+    def test_files_are_grouped_by_project_then_by_source_path(self) -> None:
+        key = make_key({"a": 1})
+        path = self.cache.location(self.PROJECT, "lisp/sample.el", "lines-1-3", "English", key)
+        rel = path.relative_to(self.root)
+        self.assertEqual(rel.parts[0], project_folder(self.PROJECT))
+        self.assertEqual(rel.parts[1:3], ("lisp", "sample.el"))
+        self.assertEqual(rel.name, f"lines-1-3-English-{key[:8]}.org")
+
+    def test_projects_with_the_same_name_do_not_share_a_folder(self) -> None:
+        self.assertNotEqual(project_folder("/a/dotfiles"), project_folder("/b/dotfiles"))
+        self.assertTrue(project_folder("/a/My Project!").startswith("My-Project-"))
+
+    def test_a_name_collision_is_not_a_match(self) -> None:
+        key = make_key({"a": 1})
+        # Same first eight characters, different key: the file name matches, the key does not.
+        other = key[:8] + "0" * 56
+        self._write(other, f"#+KEY: {other}\n")
+        self.assertIsNone(self.cache.locate(self.PROJECT, "lisp/sample.el", key))
 
     def test_key_changes_with_any_input(self) -> None:
         base = {"snapshot_hash": "h", "task": "explain_file", "model": None}
@@ -484,18 +697,27 @@ class CacheTests(unittest.TestCase):
         self.assertNotEqual(make_key(base), make_key({**base, "snapshot_hash": "h2"}))
         self.assertEqual(make_key(base), make_key(dict(reversed(list(base.items())))))
 
-    def test_clear_removes_entries(self) -> None:
+    def test_clear_removes_entries_and_the_folders_left_empty(self) -> None:
         for i in range(3):
-            self.cache.put(make_key({"i": i}), {"i": i})
+            self._write(make_key({"i": i}), "x", file=f"lisp/f{i}.el")
         self.assertEqual(self.cache.clear(), 3)
         self.assertEqual(self.cache.count(), 0)
+        self.assertEqual(list(self.root.iterdir()), [])
 
-    def test_wrong_schema_is_a_miss(self) -> None:
-        key = make_key({"x": 1})
-        path = self.cache._path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"schema": 999, "payload": {}}), encoding="utf-8")
-        self.assertIsNone(self.cache.get(key))
+    def test_legacy_entries_are_never_read_and_are_cleared(self) -> None:
+        key = make_key({"legacy": 1})
+        old_folder = self.root / key[:2]
+        old_folder.mkdir(parents=True)
+        (old_folder / f"{key}.json").write_text(json.dumps({"schema": 1, "payload": {}}), encoding="utf-8")
+        (old_folder / f"{key}.org").write_text(f"#+KEY: {key}\n", encoding="utf-8")
+        self.assertIsNone(self.cache.locate(self.PROJECT, "lisp/sample.el", key))
+        self.assertEqual(self.cache.clear(), 2)
+
+    def test_keys_must_be_well_formed(self) -> None:
+        with self.assertRaises(ValueError):
+            self.cache.location(self.PROJECT, "lisp/sample.el", "whole-file", "English", "../../outside")
+        with self.assertRaises(ValueError):
+            self.cache.locate(self.PROJECT, "lisp/sample.el", "../../outside")
 
 
 if __name__ == "__main__":

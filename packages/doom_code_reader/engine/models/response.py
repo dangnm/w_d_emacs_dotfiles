@@ -64,6 +64,28 @@ def parse_structured(structured: Any, result_text: str | None) -> dict[str, Any]
     return value
 
 
+MAX_ANSWER_CHARS = 6000
+
+
+def normalize_answer(structured: dict[str, Any]) -> str:
+    """Return the answer to a follow-up question, or raise :class:`InvalidResponse`."""
+    answer = structured.get("answer")
+    if not isinstance(answer, str) or not answer.strip():
+        raise InvalidResponse("the model returned no answer")
+    return answer.strip()[:MAX_ANSWER_CHARS]
+
+
+MAX_SECTION_CHARS = 3000
+
+
+def normalize_section_explanation(structured: dict[str, Any]) -> str:
+    """Return a section's new explanation, or raise :class:`InvalidResponse`."""
+    explanation = structured.get("explanation")
+    if not isinstance(explanation, str) or not explanation.strip():
+        raise InvalidResponse("the model returned no explanation")
+    return explanation.strip()[:MAX_SECTION_CHARS]
+
+
 def _string_list(raw: Any, warnings: list[dict[str, Any]], name: str) -> list[str]:
     if raw is None:
         return []

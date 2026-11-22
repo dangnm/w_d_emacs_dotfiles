@@ -66,6 +66,10 @@ def _save_state(path: str, known: set[str]) -> None:
 
 
 def _structured(prompt: str, mode: str) -> dict:
+    if "Section refresh:" in prompt:
+        return {"explanation": "Giải thích làm mới giả lập cho đoạn này."}
+    if "Question from the reader:" in prompt:
+        return {"answer": "Đây là câu trả lời giả lập cho câu hỏi."}
     match = re.search(r"Target lines:\s*(\d+)-(\d+)", prompt)
     start, end = (int(match.group(1)), int(match.group(2))) if match else (1, 1)
     sections = [

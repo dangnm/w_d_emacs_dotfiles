@@ -15,66 +15,76 @@
 (require 'cl-lib)
 
 (defface code-reader-active-section-face
-  '((t :inherit highlight :extend t))
-  "Face marking the explanation section that matches the code being viewed."
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Colour of the fringe bar that marks the explanation section for the code under point."
   :group 'code-reader)
 
 (defface code-reader-source-range-face
-  '((t :inherit region :extend t))
-  "Face marking the source lines explained by the section that was jumped to."
+  '((t :inherit font-lock-builtin-face :weight bold))
+  "Colour of the fringe bar that marks the source lines of the section that was jumped to."
   :group 'code-reader)
 
-(defface code-reader-stale-face
-  '((t :inherit warning :weight bold))
-  "Face for the stale-explanation notice in the explanation header."
-  :group 'code-reader)
 
-(defvar-local code-reader-highlight--active-overlay nil
-  "Overlay marking the active section in the explanation buffer.")
+(defvar-local code-reader-highlight--active-marks nil
+  "Fringe-bar overlays marking the active section in the explanation buffer.")
 
-(defvar-local code-reader-highlight--source-overlay nil
-  "Overlay marking the explained source range in the source buffer.")
+(defvar-local code-reader-highlight--source-marks nil
+  "Fringe-bar overlays marking the explained source range in the source buffer.")
 
-;;; Overlays
+;;; Marks
+;;
+;; A mark is a column of bars in the left fringe, one bar per line.  The text
+;; keeps its own colours, unlike a background highlight, which is hard to read.
+;; Each mark is an empty overlay at the start of a line whose `before-string' is
+;; drawn in the fringe.
 
-(defun code-reader-highlight--move (var buffer start end face)
-  "Replace the overlay in VAR (buffer-local in BUFFER) by START..END in FACE."
+(defun code-reader-highlight--mark-lines (buffer var start end face)
+  "Replace the marks held in VAR (buffer-local in BUFFER) with one bar per line in START..END."
   (when (and (buffer-live-p buffer) (integerp start) (integerp end))
     (with-current-buffer buffer
-      (when (overlayp (symbol-value var))
-        (delete-overlay (symbol-value var)))
-      (let ((overlay (make-overlay (min start end) (max start end) buffer)))
-        (overlay-put overlay 'face face)
-        (overlay-put overlay 'code-reader t)
-        (set var overlay)))))
+      (mapc #'delete-overlay (symbol-value var))
+      (set var nil)
+      (save-excursion
+        (let ((stop (max start end))
+              (marks nil))
+          (goto-char (min start end))
+          (while (< (point) stop)
+            ;; A line hidden by an Org fold gets no bar. Its section's heading stays
+            ;; visible and keeps the bar.
+            (unless (invisible-p (point))
+              (let ((overlay (make-overlay (point) (point) buffer)))
+                (overlay-put overlay 'before-string
+                             (propertize " " 'display (list 'left-fringe 'filled-rectangle face)))
+                (overlay-put overlay 'code-reader t)
+                (push overlay marks)))
+            (forward-line 1))
+          (set var (nreverse marks)))))))
 
 (defun code-reader-highlight--clear (var buffer)
-  "Delete the overlay held in VAR in BUFFER, if any."
+  "Delete the marks held in VAR in BUFFER, if any."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (when (overlayp (symbol-value var))
-        (delete-overlay (symbol-value var)))
+      (mapc #'delete-overlay (symbol-value var))
       (set var nil))))
 
 (defun code-reader-highlight-set-active (buffer start end)
-  "Highlight START..END in the explanation BUFFER as the active section."
-  (code-reader-highlight--move 'code-reader-highlight--active-overlay
-                               buffer start end
-                               'code-reader-active-section-face))
+  "Mark the lines START..END in the explanation BUFFER as the active section."
+  (code-reader-highlight--mark-lines buffer 'code-reader-highlight--active-marks start end
+                                     'code-reader-active-section-face))
 
 (defun code-reader-highlight-clear-active (buffer)
-  "Remove the active-section highlight from the explanation BUFFER."
-  (code-reader-highlight--clear 'code-reader-highlight--active-overlay buffer))
+  "Remove the active-section marks from the explanation BUFFER."
+  (code-reader-highlight--clear 'code-reader-highlight--active-marks buffer))
 
 (defun code-reader-highlight-set-source (buffer start end)
-  "Highlight START..END in the source BUFFER as the explained range.
+  "Mark the lines START..END in the source BUFFER as the explained range.
 Callers pass whole-line bounds (beginning of the first line, end of the last)."
-  (code-reader-highlight--move 'code-reader-highlight--source-overlay
-                               buffer start end 'code-reader-source-range-face))
+  (code-reader-highlight--mark-lines buffer 'code-reader-highlight--source-marks start end
+                                     'code-reader-source-range-face))
 
 (defun code-reader-highlight-clear-source (buffer)
-  "Remove the explained-range highlight from the source BUFFER."
-  (code-reader-highlight--clear 'code-reader-highlight--source-overlay buffer))
+  "Remove the explained-range marks from the source BUFFER."
+  (code-reader-highlight--clear 'code-reader-highlight--source-marks buffer))
 
 ;;; Pure section lookup
 
