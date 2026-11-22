@@ -137,8 +137,11 @@ read other files in the project to answer.
 **Line-by-line detail.** `D` in the explanation pane explains the whole file in detail.
 It asks yes or no first, because it takes several minutes. It adds a `** Detail explanation`
 subsection to every section: each line of code in the section, top to bottom, with the
-line number and what that line does underneath. The code itself is not repeated, because
-the source pane shows it, and each explanation maps to its line there. The subsection
+line number underneath. Each explanation is two sentences: the decision behind the line
+(why it is there), then what would happen without it, so the flow of the code is clear.
+The model reads the section's explanation, and it searches the project for the names a
+line uses, so the reason can come from other files that use the same code. The code itself is not
+repeated, because the source pane shows it, and each explanation maps to its line there. The subsection
 starts folded; `TAB` opens it, and after `D` the details are open. A section is cut into
 pieces of about forty lines, and the pieces are explained a few at a time, so a long file
 takes a few minutes. The top of the explanation pane shows the status:

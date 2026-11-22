@@ -463,9 +463,13 @@ class Orchestrator:
 
         async def explain_piece(index: int, piece: _Piece) -> tuple[list[DetailLine], _CallResult]:
             sub = replace(req, target=Target(start_line=piece.start, end_line=piece.end))
+            # The lines group's saved explanation tells the model what the whole block is for.
+            section = doc.find_section(piece.group_start, piece.group_end)
+            group_note = (section.explanation if section else "").strip() or "(none)"
             async with semaphore:
                 ctx = collect_context(sub)
-                user_prompt = build_user_prompt(DETAIL_TASK, _prompt_values(sub, ctx))
+                values = {**_prompt_values(sub, ctx), "section_explanation": group_note}
+                user_prompt = build_user_prompt(DETAIL_TASK, values)
 
                 def on_progress(state: Any) -> None:
                     chars[index] = state.output_chars
