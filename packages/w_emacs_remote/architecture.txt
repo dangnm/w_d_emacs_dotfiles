@@ -1,0 +1,625 @@
+w_emacs_remote - Architecture Design
+====================================
+
+Status:   DRAFT - design only. No code written yet.
+Date:     2026-11-24
+Location: packages/w_emacs_remote/architecture.txt
+
+
+1. Purpose
+----------
+
+Let a GUI Emacs running on a client machine (WSL2) show and drive a GUI
+Emacs running on a server machine (macOS) over the LAN, in text form.
+
+The server renders its own layout. The server sends a text snapshot of its
+windows (text, faces, cursor, mode line, minibuffer) as deltas. The client
+draws that snapshot in its own Emacs frame. Keystrokes typed in the client
+are sent to the server and executed there.
+
+Accepted trade-off: the client shows the server's text and faces, not its
+pixels. Fonts, line heights, ligatures, images, and popups will differ.
+
+
+2. Goals
+--------
+
+G1. Smooth typing and scrolling on a LAN (no visible lag for text editing).
+G2. Same buffers, windows, point, and mode line as the server.
+G3. Server state persists. Reconnecting shows the same state.
+G4. Client side is started by typing `emacs`, then using leader keys
+    (SPC r ...). No emacsclient commands for the user.
+G5. Transport is encrypted and authenticated (SSH).
+G6. Documents with images are not rendered. The client shows an error
+    panel for that window instead.
+
+
+3. Non-goals (v1)
+-----------------
+
+N1. Pixel-exact rendering.
+N2. Images, inline images, PDF/DocView content.
+N3. Child-frame popups (corfu, company, which-key, posframe).
+N4. Tab bar and tab line.
+N5. Line numbers and fringe or margin indicators.
+N6. Multiple simultaneous clients.
+N7. Mouse input (planned for v2).
+N8. Server running without a GUI frame (daemon only).
+
+
+4. Overview
+-----------
+
+  +------------------------- macOS (server) -------------------------+
+  |  GUI Emacs (normal session)                                      |
+  |    w-emacs-remote-server-mode                                    |
+  |      - snapshot builder  (reads windows, buffers, faces)         |
+  |      - delta engine      (only changed lines are sent)           |
+  |      - key injector      (received keys -> command loop)         |
+  |      - listener on 127.0.0.1:PORT (loopback only)                |
+  +------------------------------|-----------------------------------+
+                                 |  NDJSON messages over TCP
+                                 |  (inside SSH local forward)
+  +------------------------------|-----------------------------------+
+  |  WSL2 (client)               |                                    |
+  |    ssh -N -L  (process)  ----+                                    |
+  |    w-emacs-remote-client                                          |
+  |      - connection manager   (connect, reconnect, backoff)         |
+  |      - mirror frame         (separate frame, fixed char grid)     |
+  |      - layout rebuilder     (window tree -> client windows)       |
+  |      - renderer             (mirror buffers, faces, cursor)       |
+  |      - key capture          (mirror buffers forward all keys)     |
+  +-------------------------------------------------------------------+
+
+Data flow:
+  server state -> snapshot -> diff against last snapshot -> patch -> client
+  client key   -> key message -> server unread events -> command loop
+
+
+5. Server side
+--------------
+
+5.1 Activation
+  - Enabled by w-emacs-remote-server-mode (a global minor mode).
+  - Starts a listener bound to 127.0.0.1 only. It never binds to the LAN
+    interface. Remote access happens only through the SSH local forward.
+  - Needs a real GUI frame, because layout (window-start, window edges,
+    vertical motion) only exists in a live frame.
+
+5.2 Snapshot builder
+  Runs when the server's state may have changed. Triggers:
+    - post-command-hook
+    - window-state-change-hook
+    - window-size-change-functions
+    - window-scroll-functions
+  Updates are coalesced: the builder waits for an idle interval (proposed
+  15-20 ms) so a burst of commands produces one patch.
+
+  For each window in the frame:
+    - id:            stable integer assigned per window object
+    - edges:         left, top, width, height in character cells
+    - buffer name and major mode (used for unsupported detection)
+    - screen lines:  visible lines computed with vertical motion from
+                     window-start, so soft wrapping matches the server
+    - runs:          per line, ranges of text with a face ID
+    - cursor:        point as (column, row) inside the window
+    - region:        region runs added to the face runs
+    - mode line and header line as formatted text with faces
+
+  Effective face per character = text-property face, merged with overlay
+  faces in priority order. This covers isearch, show-paren, hl-line, and
+  similar features that use overlays.
+
+  Invisible text is skipped (invisible-p). Display strings are replaced by
+  their text. Overlay before-string and after-string are included.
+  (`(space ...)` display specs become spaces, approximated by width.)
+
+  Minibuffer: the minibuffer window is a window like the others, with kind
+  "minibuffer". The echo area message is sent when no minibuffer is active.
+
+5.3 Unsupported content detection
+  Checked per window, on the visible region only:
+    - the window's buffer is in w-emacs-remote-unsupported-modes
+      (default: image-mode, doc-view-mode, pdf-view-mode)
+    - any visible character has a display property that is an image spec
+    - any overlay that covers visible text has an image display spec
+
+  A window that fails the check is sent with kind "unsupported" and a
+  reason. Other windows keep mirroring. Off-screen images do not trigger it.
+  The window is re-checked on every snapshot, so the error clears when the
+  content becomes supported again.
+
+5.4 Delta engine
+  - Each screen line gets a hash of its text and runs.
+  - A patch carries only the lines whose hash changed, per window.
+  - Layout changes (window added, removed, resized, or moved) send a full
+    layout message instead of a patch.
+  - Face table: each face is sent once per session as a resolved attribute
+    list (foreground, background, weight, slant, underline, strike, inverse).
+    Later messages refer to the face by ID. New faces are added as they
+    appear.
+  - Sanitizing: control characters are replaced with visible placeholders.
+    Lines longer than the window are cut at the window width.
+
+5.5 Key injection
+  - Received keys are queued and pushed into the server's command loop in
+    the same order they were received.
+  - The client does not echo or predict locally. It waits for the patch.
+  - Mouse events are not handled in v1.
+
+5.6 Frame size
+  - While a client is connected, the server frame is resized to the client's
+    character grid (option w-emacs-remote-resize-server, default on).
+  - On disconnect, the original size is restored.
+  - Open decision D2 (see section 13).
+
+
+6. Client side
+--------------
+
+6.1 Connection manager
+  - Starts: ssh -N -L <local>:127.0.0.1:<PORT> <host> as a child process.
+    BatchMode is on, so ssh never waits on a password prompt. Key login is
+    required.
+  - Opens a network process to 127.0.0.1:<local>.
+  - Sends hello (protocol version, client name, columns, rows). The server
+    answers with welcome and a full layout plus full text.
+  - On drop: shows a "disconnected" banner, keeps the last state greyed out,
+    and retries with exponential backoff. On reconnect the full state is
+    sent again.
+  - On ssh failure: shows the last lines of ssh stderr.
+
+6.2 Mirror frame
+  - A separate frame named "remote: <host>". Your normal client frames are
+    untouched.
+  - Fringes, scroll bars, and window dividers are set to zero, so character
+    geometry matches the server.
+  - Default font: the client's default monospace font. Line spacing is 0.
+
+6.3 Layout rebuilder
+  - Receives the window tree from the server, a nested structure of splits
+    and leaves with sizes in character cells.
+  - Rebuilds the client window tree with split-window to the same sizes,
+    then assigns each leaf its mirror buffer.
+  - Runs only when the layout message arrives, not on every patch.
+
+6.4 Renderer
+  - One mirror buffer per server window, named "*remote:<host>:<id>*".
+  - Buffer contents are only the visible screen lines (not the whole buffer),
+    so the client never scrolls on its own. Scrolling is done on the server.
+  - Lines are inserted and replaced in place. Only changed lines are touched.
+  - truncate-lines is on, so the client never re-wraps. Wrapping was already
+    done on the server.
+  - Faces: each run gets a face property that maps to a client face built
+    from the server's resolved attributes.
+  - Point is set from the cursor message. Cursor type is box, unless the
+    server says otherwise.
+  - Mirror buffers are read-only, have no file, and have autosave and backup
+    off.
+  - Variable-pitch text is shown in monospace. Content whose column alignment
+    depends on variable-pitch fonts may drift.
+  - Unsupported windows show an error panel:
+      "w_emacs_remote: this window cannot be shown.
+       <reason>: <buffer name>.
+       Images are not supported in this version."
+    The panel replaces only that window's content.
+
+6.5 Key capture
+  - Mirror buffers use a minor mode whose keymap captures every key and sends
+    it to the server.
+  - Evil and the Doom leader are disabled in mirror buffers (evil-emacs state
+    or local evil off), so the server receives SPC and the other keys.
+  - A small client-side escape prefix (default C-c r, open decision D1) is the
+    only set of keys handled on the client. It controls the connection:
+    disconnect, reconnect, toggle resize, show status.
+  - Connection commands are typed in a normal client buffer, not in a mirror
+    buffer:
+        SPC o t r c    connect to the server
+        SPC o t r d    disconnect
+    Inside a mirror buffer, SPC goes to the server, so these keys are not
+    available there. Disconnect is also available from the escape prefix.
+  - Whether the capture covers every key, including keys bound globally on
+    the client, is an assumption to verify in the prototype (section 16).
+
+
+6.6 Connection history
+  Purpose: connect remembers the servers you used, so you pick one instead of
+  retyping host and user.
+
+  Flow (SPC o t r c):
+    - A completing prompt lists saved connections, most recent first. Each
+      entry shows user@host:port, last connected time, and last result.
+      Example label: "dang@mac-mini.local:22   2026-11-24 15:03   ok"
+    - The first entry is the default, so RET connects to the last server.
+    - "New connection" at the top of the list asks for host and user.
+    - The entry is saved when a connect is attempted, and its result is
+      updated when the attempt ends (connected, auth failed, unreachable,
+      protocol mismatch, server closed).
+
+  Stored per entry:
+    host, user, ssh port, loopback server port, identity file path (path
+    only, never key content), first seen, last connected, connect count,
+    last result, short last error message.
+
+  Not stored:
+    passwords, key material, screen content, typed keys, file contents.
+
+  Storage:
+    - One JSON file, read and written with the built-in JSON functions.
+    - Location: w-emacs-remote-history-file. Default: inside the Emacs
+      directory, outside the dotfiles repo, so host and user names are not
+      committed to git.
+    - Entries are keyed by host, user, and ssh port. Repeat connects update
+      the same entry.
+    - At most w-emacs-remote-history-max entries (default 20). The least
+      recently used entry is dropped first.
+    - Writes go to a temporary file, then rename over the old file, so a
+      crash cannot leave a half-written file.
+    - Loaded once when the client starts. Saved after each change.
+
+  Forget:
+    - A command removes one entry. No key is assigned yet (see D9).
+
+
+6.7 LAN discovery
+  Purpose: list servers on the LAN in the connect prompt, without changing
+  WSL2 networking. The client does not listen for multicast. It asks each
+  address on the subnet directly.
+
+  Server side (macOS):
+    - While w-emacs-remote-server-mode is on, the server starts dns-sd to
+      register a service of type _w-emacs-remote._tcp in the local domain.
+      The process stops when server mode is turned off or Emacs exits.
+    - The instance name is w-emacs-remote-name (default: the Mac's computer
+      name).
+    - The SRV record points to the SSH port (default 22).
+    - The TXT record holds the protocol version and the name. Nothing else.
+    - No new listening port is opened. The macOS mDNS responder already
+      answers on UDP 5353.
+
+  Client side (WSL2), runs only when you press SPC o t r c:
+    1. Subnet. Read the Windows adapter addresses with ipconfig.exe through
+       WSL interop (read-only). Use the first adapter that has a private IPv4
+       address and a default gateway. If w-emacs-remote-discovery-subnet is
+       set, use that instead.
+    2. Sweep. Send one PTR query for _w-emacs-remote._tcp.local to each host
+       address in the subnet, skipping the network and broadcast addresses.
+       Send from an ephemeral UDP port to port 5353 as a unicast packet. No
+       multicast group is joined.
+    3. Collect. Wait w-emacs-remote-discovery-timeout seconds (default 2).
+       Parse each reply. Keep replies that contain the service instance, and
+       ignore everything else.
+    4. Hold. Results stay in memory until the next connect.
+    5. Show. The connect prompt lists discovered entries after the saved
+       history entries, marked "discovered". Picking one fills in the address
+       and SSH port. The user name comes from history if known, otherwise you
+       are asked for it.
+
+  Parsing: DNS message header, question, answer, and additional sections,
+  including name compression. Malformed or truncated replies are dropped.
+  The parser lives in w-emacs-remote-discovery.el, in Elisp (no helper
+  script).
+
+  Limits (v1):
+    - Only /24 subnets are swept (254 queries). A larger subnet shows a
+      message and is not swept.
+    - Only hosts that answer mDNS on port 5353 are found. Hosts on another
+      subnet (VPN, separate VLAN) are not found.
+    - The Mac's address can change. Each sweep finds it again.
+
+
+7. Protocol
+-----------
+
+7.1 Framing
+  - Transport: TCP, inside the SSH tunnel.
+  - Format: newline-delimited JSON (one message per line). Each message is an
+    object with a "type" field.
+  - Encoding and decoding use Emacs built-in JSON functions.
+
+7.2 Version
+  - Each side sends a protocol version in hello and welcome.
+  - A mismatch closes the connection with a readable message.
+
+7.3 Client to server
+  hello      version, client name, columns, rows
+  key        ordered list of key events
+  resize     columns, rows
+  ping       timestamp, used to measure latency
+  bye        clean disconnect
+
+  A key event is either a character code with modifier bits, or a symbol
+  name (for example "f5" or "return").
+
+7.4 Server to client
+  welcome    version, server name, frame columns, rows
+  faces      new face IDs and their resolved attributes
+  layout     full window tree and window kinds (text, minibuffer, unsupported)
+  lines      full or partial screen lines for one window:
+             window ID, start row, list of lines
+             each line: text, list of runs (start, length, face ID)
+  cursor     window ID, column, row, cursor type
+  status     chosen windows, selected window, echo area text
+  error      window ID, reason (for unsupported content)
+  pong       echoes the ping timestamp
+  bye        reason for closing
+
+7.5 Patch rules
+  - A lines message only replaces the rows it names.
+  - A layout message resets all windows; the client rebuilds from scratch.
+  - Messages are applied in order. The client keeps no pending state other
+    than the last full layout.
+
+
+8. Client and server state
+--------------------------
+
+Server:
+  - window ID table (weak, keyed by window object)
+  - face ID table
+  - last sent snapshot (per window: line hashes, cursor, edges)
+  - original frame size (for restore on disconnect)
+  - dns-sd process handle (advertisement, server mode only)
+
+Client:
+  - connection state (connecting, connected, disconnected, failed)
+  - ssh process and network process
+  - mirror frame and its window map (server window ID -> client window)
+  - face table and line cache (for the banner's greyed-out view)
+  - saved connections list (loaded at start, updated on each connect)
+  - discovered servers (from the last sweep, in memory only)
+
+
+9. Failure handling
+-------------------
+
+  Network drops mid-typing  Keys typed while offline are not queued.
+                            The client tells you it is disconnected and
+                            drops them, so they cannot run later by surprise.
+  Server Emacs quits        Client gets EOF and shows "server closed".
+  No GUI frame on server    Server replies with error (no-frame).
+  SSH auth fails            Banner with ssh stderr tail. No retry loop
+                            for auth errors.
+  Protocol mismatch         Refuse with version numbers in the message.
+  Huge lines or huge frames Lines are cut at window width. Snapshot work
+                            is limited to visible lines.
+  Unsupported content       Error panel for that window (section 5.3).
+  Bad characters            Replaced with visible placeholders.
+  History file corrupt      Renamed to a .bad copy, start with an empty
+                            history, and show a message.
+  Discovery finds nothing   Show "no servers found". History and manual
+                            entry still work.
+  Malformed DNS reply       Dropped. Counted in the debug log only.
+  Subnet not /24            Sweep skipped with a message. Set the subnet
+                            override to a /24 inside your network.
+  dns-sd missing or fails   Advertisement is off and server mode shows one
+                            message. Server mode still works.
+
+
+10. Security
+------------
+
+  - The server listens on 127.0.0.1 only. The only way in is the SSH local
+    forward, which needs your SSH key.
+  - Key events are arbitrary input to your Emacs. Anyone who can reach the
+    port could run commands as you. Loopback binding plus SSH is the
+    protection. Protect the SSH key and the Mac account.
+  - Content is not logged by default. Debug logging is opt-in and writes
+    only to a local file.
+  - Passwords typed with read-passwd are sent as keys through the encrypted
+    tunnel. The server shows them as asterisks, so the client only sees
+    asterisks.
+  - Mirror buffers exist only in memory. They have no file and no autosave or
+    backup, so server content is not written to disk on the client.
+  - The connections file holds host and user names and identity file paths.
+    It stays on the client, outside the dotfiles repo, and holds no secrets.
+  - Discovery tells the LAN that a Mac runs an Emacs server. Its TXT record
+    carries only a version and a name, so anyone on the LAN who browses for
+    the service sees the same thing.
+  - The client's sweep shows LAN hosts that a client is running. It runs only
+    when you press SPC o t r c.
+  - A discovered entry is a hint, not trust. Its SSH host key is checked like
+    any other host: trust on first use, and a warning if it changes.
+
+
+11. Configuration (names are proposals)
+---------------------------------------
+
+  w-emacs-remote-server-port          loopback port on the server
+  w-emacs-remote-ssh-host             SSH host (name or LAN IP)
+  w-emacs-remote-ssh-user             SSH user on the server
+  w-emacs-remote-ssh-identity         path to SSH key (optional)
+  w-emacs-remote-escape-prefix        client-side prefix key (D1)
+  w-emacs-remote-resize-server        resize server frame to client (D2)
+  w-emacs-remote-update-interval      coalescing interval, seconds
+  w-emacs-remote-unsupported-modes    major modes that show the error panel
+  w-emacs-remote-debug                opt-in debug log file
+  w-emacs-remote-history-file         path of the saved connections file
+  w-emacs-remote-history-max          maximum saved connections (default 20)
+  w-emacs-remote-discovery-subnet     LAN subnet to sweep, e.g. 192.168.150.0/24 (default: auto)
+  w-emacs-remote-discovery-timeout    seconds to wait for discovery replies (default 2)
+  w-emacs-remote-advertise            advertise on the LAN while server mode is on (D10)
+  w-emacs-remote-name                 name shown in discovery (default: computer name)
+
+Naming: the folder uses underscores (w_emacs_remote). The Elisp symbols and
+file names use hyphens, which is the Emacs convention (w-emacs-remote-*).
+
+
+12. Planned files
+-----------------
+
+  packages/w_emacs_remote/
+    architecture.txt              this document
+    w-emacs-remote.el             entry point, customization group, commands,
+                                  keymaps, global mode wiring
+    w-emacs-remote-protocol.el    framing, encode and decode, versions,
+                                  message builders
+    w-emacs-remote-server.el      listener, snapshot builder, delta engine,
+                                  key injection, frame resize,
+                                  unsupported detection, dns-sd advertisement
+    w-emacs-remote-client.el      ssh and network connection, mirror frame,
+                                  layout rebuilder, renderer, face mapping,
+                                  key capture, error panels
+    w-emacs-remote-history.el     saved connections: load, save, dedupe,
+                                  prune, corruption recovery (no UI)
+    w-emacs-remote-discovery.el   client sweep and DNS reply parsing (no UI)
+    w-emacs-remote-tests.el       ERT tests (see section 15)
+
+  How config.org loads packages/ is not changed by this design. To be
+  confirmed before wiring.
+
+
+13. Open decisions
+------------------
+
+  D1  Escape prefix used inside a mirror buffer. Default proposed: C-c r.
+      The connect and disconnect keys (SPC o t r c, SPC o t r d) are decided
+      (section 6.5). D1 covers only the keys used inside mirror buffers.
+  D2  Resize the Mac's Emacs frame to match the client while connected.
+      Default proposed: yes, restore on disconnect. The Mac user will see the
+      window change size while connected.
+  D3  Child-frame popups (corfu, company, which-key, posframe). Default
+      proposed: not mirrored in v1. Tell me if this blocks you.
+  D4  Line numbers and fringe or margin markers. Default proposed: not in
+      v1. They can be added later by computing numbers on the server.
+  D5  Mac Emacs version and build (for example, Emacs.app or Homebrew).
+      Needed to verify the server side.
+  D6  Confirm Doom Emacs is the leader setup. The dotfiles look like Doom
+      (doom_3_0_0_pre_config.org).
+  D7  Port number for the loopback listener. Default proposed: 17853.
+
+  D8  SPC o t may already be taken. As far as I know, Doom's terminal module
+      binds SPC o t to open a terminal. The dotfiles repo does not include
+      the Doom module list (init.el), so I could not confirm whether :term
+      is enabled. If it is, either move the terminal binding or choose
+      another prefix for the remote commands.
+
+  D9  Key to forget a saved connection. Proposed: SPC o t r f.
+      Confirm, or leave it as a command with no key.
+
+  D10 Advertise on the LAN while server mode is on. Default proposed: on,
+      with w-emacs-remote-advertise to turn it off. Turning it off hides the
+      Mac from discovery but does not affect SSH or history.
+  D11 Subnet choice when Windows reports more than one LAN adapter (Wi-Fi,
+      Ethernet, VPN). Default proposed: the first private adapter with a
+      default gateway, with w-emacs-remote-discovery-subnet as the override.
+
+
+14. Milestones and acceptance
+-----------------------------
+
+  M0  Skeleton
+      Protocol and hello/welcome between two Emacs processes on the same
+      machine (loopback, no SSH).
+      Accept: ping round trip on loopback under 5 ms.
+
+  M1  Single-window text mirror
+      Text, faces, cursor, keys, scrolling. No splits.
+      Accept: typing, C-g, M-x, and C-v all behave the same on the client
+      as on the server, for one window.
+
+  M2  Layout
+      Window tree, multiple windows, mode line, minibuffer.
+      Accept: C-x 3 and C-x 2 on the server reproduce the same splits on
+      the client. The minibuffer prompt and input match.
+
+  M3  Overlays, region, cursor, unsupported panels
+      isearch, show-paren, hl-line, region, cursor types, sanitizing, and
+      the image error panel.
+      Accept: an image buffer on the server shows the error panel on the
+      client. Other windows keep working.
+
+  M4  SSH transport and lifecycle
+      connect, disconnect, reconnect with backoff, resize sync, ssh failure
+      messages, connection history.
+      Accept: WSL2 client connects to the Mac over the LAN through SSH.
+      Dropping the network and reconnecting restores the same server state.
+
+  M4b Discovery
+      Mac advertises with dns-sd while server mode is on. WSL2 sweep on
+      connect lists discovered servers.
+      Accept: with server mode on, SPC o t r c lists the Mac within 3
+      seconds. With server mode off, it is not listed. Picking a discovered
+      entry connects the same way as a history entry.
+
+  M5  Polish
+      Mouse (v2), tests, documentation.
+
+  Proposed performance targets, to be measured (not promises):
+    - Key to visible update under 50 ms on the LAN (95th percentile).
+    - Snapshot and diff under 10 ms for an 80 x 40 frame on the server.
+
+
+15. Testing
+-----------
+
+  Automated (ERT, in w-emacs-remote-tests.el):
+    - protocol encode and decode round trip, including version mismatch
+    - snapshot fixtures: plain text, faces, invisible text, overlays,
+      display strings, region, cursor position
+    - image detection: visible image, off-screen image, image-mode buffer
+    - delta: unchanged lines produce no patch; one changed line produces one
+      line entry
+    - history: save and load round trip; dedupe by host, user, and port;
+      pruning to the max; corrupt file recovery
+    - discovery: reply parsing (valid, truncated, compressed names, unrelated
+      services); one unicast query per host address, none to multicast;
+      subnet parsing from ipconfig output; /24 limit
+
+  Manual:
+    - loopback test on one machine (M0-M1)
+    - two machines on the LAN (M2 onward)
+    - the Mac Emacs version and the WSL2 Emacs version both recorded
+    - discovery on the real LAN: Mac server mode on and off, then SPC o t r c
+      from WSL2. Also with a printer or other mDNS device on the LAN.
+
+
+16. Assumptions to verify in the prototype
+------------------------------------------
+
+  A1  Visible screen lines can be computed with vertical motion from
+      window-start, matching the server's wrapping.
+  A2  The cursor position can be computed as column and row inside a window.
+  A3  Keys can be injected into the server's command loop in order, without
+      breaking prefix keys or the minibuffer.
+  A4  The client's key capture covers every key in mirror buffers, including
+      keys bound globally on the client.
+  A5  Window trees can be rebuilt on the client with the same character
+      sizes, with fringes, scroll bars, and dividers set to zero.
+  A6  Face attributes can be resolved on the server and applied on the client
+      without losing the look that matters (colors, weight, slant, underline).
+  A7  The macOS mDNS responder answers unicast queries (legacy unicast, RFC
+      6762) for a service registered with dns-sd.
+  A8  Replies from the LAN reach WSL2 through NAT and the Windows firewall
+      with no configuration change.
+  A9  dns-sd stays registered while its process runs, and disappears when
+      the process stops.
+
+
+17. Risks
+---------
+
+  R1  Redisplay mismatch. Some modes compute display differently from the
+      lisp APIs. Mitigation: start with the modes you use most, and add
+      special cases one at a time.
+  R2  Key capture conflicts with Doom and evil. Mitigation: disable evil in
+      mirror buffers, and keep the escape prefix small.
+  R3  Performance on large frames with many faces. Mitigation: visible lines
+      only, delta patches, coalesced updates.
+  R4  Feature creep (popups, images, line numbers). Mitigation: keep the
+      non-goals list and the error panels; add features one milestone at a
+      time.
+  R5  Server-side changes to the Mac's Emacs while connected (frame size,
+      focus). Mitigation: D2 decision and restore on disconnect.
+  R6  Sweep noise on the LAN (254 small packets per connect). Mitigation:
+      sweep only on connect, keep results for the session only, and let the
+      user turn advertising off.
+
+
+18. Next step
+-------------
+
+  Review this document. Answer D1-D11, especially D2 (resize), D8
+  (SPC o t conflict), D9 (forget key), D10, and D11. After that, the first
+  build step is M0 on one machine, with no
+  SSH and no UI, to test the protocol.
