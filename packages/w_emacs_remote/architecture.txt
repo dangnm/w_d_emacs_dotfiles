@@ -3,14 +3,16 @@ w_emacs_remote - Architecture Design
 
 Status:   DRAFT - design only. No code written yet.
 Date:     2026-11-24
+Revised:  2026-11-25 (platform detection, 6.1 and 6.8; reuse review, 18)
 Location: packages/w_emacs_remote/architecture.txt
 
 
 1. Purpose
 ----------
 
-Let a GUI Emacs running on a client machine (WSL2) show and drive a GUI
-Emacs running on a server machine (macOS) over the LAN, in text form.
+Let a GUI Emacs running on a client machine (Windows, WSL2, or macOS) show
+and drive a GUI Emacs running on a server machine (macOS) over the LAN, in
+text form.
 
 The server renders its own layout. The server sends a text snapshot of its
 windows (text, faces, cursor, mode line, minibuffer) as deltas. The client
@@ -61,7 +63,7 @@ N8. Server running without a GUI frame (daemon only).
                                  |  NDJSON messages over TCP
                                  |  (inside SSH local forward)
   +------------------------------|-----------------------------------+
-  |  WSL2 (client)               |                                    |
+  |  Client (Windows/WSL2/macOS) |                                    |
   |    ssh -N -L  (process)  ----+                                    |
   |    w-emacs-remote-client                                          |
   |      - connection manager   (connect, reconnect, backoff)         |
@@ -92,8 +94,8 @@ Data flow:
     - window-state-change-hook
     - window-size-change-functions
     - window-scroll-functions
-  Updates are coalesced: the builder waits for an idle interval (proposed
-  15-20 ms) so a burst of commands produces one patch.
+  Updates are coalesced: a timer (run-at-time) waits for an idle interval
+  (proposed 15-20 ms) so a burst of commands produces one patch (section 18).
 
   For each window in the frame:
     - id:            stable integer assigned per window object
@@ -106,9 +108,21 @@ Data flow:
     - region:        region runs added to the face runs
     - mode line and header line as formatted text with faces
 
+  Layout comes from window-tree, and the cursor cell from posn-col-row
+  (section 18).
+
   Effective face per character = text-property face, merged with overlay
-  faces in priority order. This covers isearch, show-paren, hl-line, and
-  similar features that use overlays.
+  faces by the face rule below. This covers isearch, show-paren, hl-line, and
+  similar features that use overlays. Faces are read run by run
+  (next-char-property-change), not character by character.
+
+  Face rule: for each attribute (foreground, background, weight, slant,
+  underline, strike-through, inverse-video), take the value from the
+  highest-priority source that sets it. Sources in order: overlays by
+  descending priority, then the text's face property (list order). A value
+  of unspecified falls through to the next source. face-attribute follows
+  :inherit (tested in batch). Taking only the top face is not enough: an
+  overlay background and a text foreground must both survive (section 18).
 
   Invisible text is skipped (invisible-p). Display strings are replaced by
   their text. Overlay before-string and after-string are included.
@@ -135,7 +149,8 @@ Data flow:
   - Layout changes (window added, removed, resized, or moved) send a full
     layout message instead of a patch.
   - Face table: each face is sent once per session as a resolved attribute
-    list (foreground, background, weight, slant, underline, strike, inverse).
+    list (foreground, background, weight, slant, underline, strike, inverse),
+    read with face-all-attributes (section 18).
     Later messages refer to the face by ID. New faces are added as they
     appear.
   - Sanitizing: control characters are replaced with visible placeholders.
@@ -143,7 +158,11 @@ Data flow:
 
 5.5 Key injection
   - Received keys are queued and pushed into the server's command loop in
-    the same order they were received.
+    the same order they were received. unread-command-events is the native
+    queue for this (section 18).
+  - C-g is queued like any other key. The filter that receives keys runs only
+    when Lisp yields, so a C-g cannot interrupt a command that is already
+    running on the server (A17, D15, R10).
   - The client does not echo or predict locally. It waits for the patch.
   - Mouse events are not handled in v1.
 
@@ -157,9 +176,74 @@ Data flow:
 6. Client side
 --------------
 
-6.1 Connection manager
-  - Starts: ssh -N -L <local>:127.0.0.1:<PORT> <host> as a child process.
-    BatchMode is on, so ssh never waits on a password prompt. Key login is
+6.1 Client platform and network setup
+  Runs at the start of each connect (SPC o t r c), before any ssh process
+  starts. Three client types are supported: macOS Emacs, Windows Emacs, and
+  Emacs in WSL2. Each type needs its own ssh program and subnet source.
+  Emacs never resolves a host name itself (section 18): the address comes
+  from discovery or history, and ssh resolves names in its own process. Every
+  child process (ssh, route, ipconfig, ipconfig.exe) starts with make-process
+  and a sentinel, so Emacs keeps running while it works.
+
+  Detection (first match wins):
+    1. Override. If w-emacs-remote-client-platform is not "auto", use it.
+    2. macos:   system-type is darwin.
+    3. windows: system-type is windows-nt.
+    4. wsl2:    system-type is gnu/linux and /proc/sys/kernel/osrelease
+                contains "WSL2". WSL_DISTRO_NAME is a second check. The WSL2
+                mode is "mirrored" if the eth0 address (network-interface-list)
+                is in the same subnet as a Windows adapter (ipconfig.exe),
+                otherwise "nat".
+    5. wsl1:    gnu/linux with a Microsoft kernel and no WSL2 marker. Stops
+                with "WSL1 is not supported. Use WSL2."
+    6. unknown: anything else (plain Linux, Cygwin, MSYS2). Stops and names
+                the system type. The override can select a profile (D12).
+
+  Profiles:
+    macos           ssh: /usr/bin/ssh
+                    address: from discovery or history
+                    subnet: network-interface-list, route -n get default
+    windows         ssh: ssh.exe on PATH
+                    address: from discovery or history
+                    subnet: network-interface-list (A15)
+    wsl2 nat        ssh: ssh inside WSL
+                    address: from discovery or history
+                    subnet: ipconfig.exe via WSL interop (eth0 is internal)
+    wsl2 mirrored   ssh: ssh inside WSL
+                    address: from discovery or history
+                    subnet: network-interface-list (eth0 is on the LAN)
+
+  Names are not resolved in Emacs. A typed name reaches ssh, which resolves it
+  in a child process. The Windows name check (A11) matters only for ssh.exe.
+
+  Identity files stay in each side's own format: a Windows path (C:\...) for
+  the Windows profile, and ~/.ssh inside WSL for the WSL2 profile. Windows and
+  WSL2 do not share keys unless you copy them.
+
+  Preflight (all profiles). Each step stops at its first failure with one
+  message:
+    1. The ssh program is found (executable-find; no network call).
+    2. An address is known: the IP from discovery or from history. If none is
+       known (a typed name, never seen before), the TCP probe is skipped and
+       ssh resolves the name itself. Its stderr reports a failure (6.2).
+    3. The SSH port accepts a TCP connection to that IP, started with
+       make-network-process :nowait and an IP literal (0.2 ms in testing,
+       section 18). The wait is w-emacs-remote-preflight-timeout (default 3 s).
+       A failure usually means the Mac is asleep, Remote Login is off, or a
+       firewall blocks the port.
+    4. The tunnel starts (6.2). Login problems come from ssh stderr there,
+       not from preflight.
+
+  Status: the connect prompt and status line show the profile and mode, for
+  example "client: wsl2 (nat), discovery by sweep". The debug log records the
+  same values. ssh is started with an argument list, never a shell string.
+
+
+6.2 Connection manager
+  - Runs only after preflight (6.1) passes. Starts the profile's ssh program
+    with make-process and a sentinel: <ssh> -N -L <local>:127.0.0.1:<PORT>
+    <host>. The host is the name the user chose or the IP that preflight used.
+  - BatchMode is on, so ssh never waits on a password prompt. Key login is
     required.
   - Opens a network process to 127.0.0.1:<local>.
   - Sends hello (protocol version, client name, columns, rows). The server
@@ -169,21 +253,21 @@ Data flow:
     sent again.
   - On ssh failure: shows the last lines of ssh stderr.
 
-6.2 Mirror frame
+6.3 Mirror frame
   - A separate frame named "remote: <host>". Your normal client frames are
     untouched.
   - Fringes, scroll bars, and window dividers are set to zero, so character
     geometry matches the server.
   - Default font: the client's default monospace font. Line spacing is 0.
 
-6.3 Layout rebuilder
+6.4 Layout rebuilder
   - Receives the window tree from the server, a nested structure of splits
     and leaves with sizes in character cells.
   - Rebuilds the client window tree with split-window to the same sizes,
     then assigns each leaf its mirror buffer.
   - Runs only when the layout message arrives, not on every patch.
 
-6.4 Renderer
+6.5 Renderer
   - One mirror buffer per server window, named "*remote:<host>:<id>*".
   - Buffer contents are only the visible screen lines (not the whole buffer),
     so the client never scrolls on its own. Scrolling is done on the server.
@@ -204,7 +288,7 @@ Data flow:
        Images are not supported in this version."
     The panel replaces only that window's content.
 
-6.5 Key capture
+6.6 Key capture
   - Mirror buffers use a minor mode whose keymap captures every key and sends
     it to the server.
   - Evil and the Doom leader are disabled in mirror buffers (evil-emacs state
@@ -222,11 +306,12 @@ Data flow:
     the client, is an assumption to verify in the prototype (section 16).
 
 
-6.6 Connection history
+6.7 Connection history
   Purpose: connect remembers the servers you used, so you pick one instead of
   retyping host and user.
 
-  Flow (SPC o t r c):
+  Flow (SPC o t r c). The prompt is completing-read; annotations and groups
+  come from completion metadata (section 18):
     - A completing prompt lists saved connections, most recent first. Each
       entry shows user@host:port, last connected time, and last result.
       Example label: "dang@mac-mini.local:22   2026-11-24 15:03   ok"
@@ -238,8 +323,9 @@ Data flow:
 
   Stored per entry:
     host, user, ssh port, loopback server port, identity file path (path
-    only, never key content), first seen, last connected, connect count,
-    last result, short last error message.
+    only, never key content), last IP address seen (used by preflight, 6.1),
+    first seen, last connected, connect count, last result, short last error
+    message.
 
   Not stored:
     passwords, key material, screen content, typed keys, file contents.
@@ -261,10 +347,10 @@ Data flow:
     - A command removes one entry. No key is assigned yet (see D9).
 
 
-6.7 LAN discovery
+6.8 LAN discovery
   Purpose: list servers on the LAN in the connect prompt, without changing
-  WSL2 networking. The client does not listen for multicast. It asks each
-  address on the subnet directly.
+  any client's network setup. The client does not listen for multicast. It
+  asks each address on the subnet directly.
 
   Server side (macOS):
     - While w-emacs-remote-server-mode is on, the server starts dns-sd to
@@ -277,15 +363,21 @@ Data flow:
     - No new listening port is opened. The macOS mDNS responder already
       answers on UDP 5353.
 
-  Client side (WSL2), runs only when you press SPC o t r c:
-    1. Subnet. Read the Windows adapter addresses with ipconfig.exe through
-       WSL interop (read-only). Use the first adapter that has a private IPv4
-       address and a default gateway. If w-emacs-remote-discovery-subnet is
-       set, use that instead.
+  Client side (all platforms), runs only when you press SPC o t r c. The
+  subnet source comes from the platform profile (6.1):
+    1. Subnet. Read the adapter addresses and netmasks from the profile's
+       source (read-only): network-interface-list on macOS, Windows, and
+       WSL2 mirrored; ipconfig.exe through WSL interop on WSL2 NAT, where eth0
+       holds an internal address. Use the first private IPv4 adapter that has
+       a default gateway (route -n get default on macOS; the gateway in
+       ipconfig output on Windows and WSL2, run as a make-process child, 6.1).
+       If w-emacs-remote-discovery-subnet is set, use that instead.
     2. Sweep. Send one PTR query for _w-emacs-remote._tcp.local to each host
        address in the subnet, skipping the network and broadcast addresses.
        Send from an ephemeral UDP port to port 5353 as a unicast packet. No
-       multicast group is joined.
+       multicast group is joined. Emacs has no sendto, so each host gets its
+       own connected socket. A socket closes when its reply arrives or the
+       timeout ends, so up to 254 are open at once (A18).
     3. Collect. Wait w-emacs-remote-discovery-timeout seconds (default 2).
        Parse each reply. Keep replies that contain the service instance, and
        ignore everything else.
@@ -295,10 +387,21 @@ Data flow:
        and SSH port. The user name comes from history if known, otherwise you
        are asked for it.
 
-  Parsing: DNS message header, question, answer, and additional sections,
-  including name compression. Malformed or truncated replies are dropped.
-  The parser lives in w-emacs-remote-discovery.el, in Elisp (no helper
-  script).
+  Packets: queries are built and replies decoded with dns.el (dns-write and
+  dns-read, section 18). We do not write a DNS parser. The sender (unicast
+  from an ephemeral port to port 5353) and the sweep live in
+  w-emacs-remote-discovery.el, in Elisp (no helper script). dns-read-name
+  follows compression pointers with no loop guard, so every reply is decoded
+  inside condition-case, and replies over the size cap are dropped before
+  decoding. Malformed or truncated replies are dropped. Measured on macOS:
+  about 90 us per reply (254 replies, about 23 ms); a self-pointing name
+  errors in about 7 ms and is caught.
+
+  UDP: the sweep needs datagram sockets. dns.el's own comment says they are
+  missing on MS-Windows, so this is checked on Windows first (A14). Windows
+  must also hold 254 sockets at once (A18). If datagram sockets are missing,
+  discovery is off on Windows with one message. If the limit is lower, the
+  sweep runs in batches (D14).
 
   Limits (v1):
     - Only /24 subnets are swept (254 queries). A larger subnet shows a
@@ -306,6 +409,10 @@ Data flow:
     - Only hosts that answer mDNS on port 5353 are found. Hosts on another
       subnet (VPN, separate VLAN) are not found.
     - The Mac's address can change. Each sweep finds it again.
+    - The sweep is the only discovery method on every client. macOS does not
+      use dns-sd browse in v1, so there is one sender to test.
+    - WSL2 NAT: LAN multicast does not reach WSL2. The sweep works there only
+      if the replies return through NAT (A8).
 
 
 7. Protocol
@@ -368,6 +475,7 @@ Client:
   - face table and line cache (for the banner's greyed-out view)
   - saved connections list (loaded at start, updated on each connect)
   - discovered servers (from the last sweep, in memory only)
+  - platform profile and WSL2 mode (detected at each connect, section 6.1)
 
 
 9. Failure handling
@@ -390,10 +498,25 @@ Client:
   Discovery finds nothing   Show "no servers found". History and manual
                             entry still work.
   Malformed DNS reply       Dropped. Counted in the debug log only.
+  Compression loop in reply Dropped inside condition-case. Counted in the
+                            debug log.
+  No UDP datagram sockets   Sweep is off on that client, with one message
+                            (A14, D14). Typed address still works.
+  Socket limit reached      Sweep runs in batches (D14). Typed address still
+                            works.
   Subnet not /24            Sweep skipped with a message. Set the subnet
                             override to a /24 inside your network.
   dns-sd missing or fails   Advertisement is off and server mode shows one
                             message. Server mode still works.
+  Platform unknown          Preflight stops. The message names the system
+                            type and points to w-emacs-remote-client-platform.
+  WSL1 detected             Stops with "WSL1 is not supported. Use WSL2."
+  ssh program not found     Stops at preflight and names the program tried.
+  No address known          Preflight skips the TCP probe. ssh reports the
+                            name it could not resolve on stderr. Use discovery
+                            or a typed IP.
+  SSH port not answering    Stops at preflight. Usually the Mac is asleep,
+                            Remote Login is off, or a firewall blocks port 22.
 
 
 10. Security
@@ -420,6 +543,16 @@ Client:
     when you press SPC o t r c.
   - A discovered entry is a hint, not trust. Its SSH host key is checked like
     any other host: trust on first use, and a warning if it changes.
+  - Discovered host names come from the LAN and are untrusted. They are passed
+    to ssh as one argument, never through a shell. A name that starts with "-"
+    is rejected, so it cannot be read as an ssh option.
+  - Platform detection reads the OS type, the WSL kernel marker, and interface
+    addresses. It sends nothing to the server.
+  - DNS replies are untrusted LAN traffic. They are decoded with a size cap
+    and inside condition-case, so a self-pointing name or a truncated packet
+    is dropped. Nothing in a reply is run or used as a file name.
+  - Child processes (ssh, route, ipconfig, ipconfig.exe) take argument lists,
+    never a shell string.
 
 
 11. Configuration (names are proposals)
@@ -440,6 +573,9 @@ Client:
   w-emacs-remote-discovery-timeout    seconds to wait for discovery replies (default 2)
   w-emacs-remote-advertise            advertise on the LAN while server mode is on (D10)
   w-emacs-remote-name                 name shown in discovery (default: computer name)
+  w-emacs-remote-client-platform      auto, macos, windows, or wsl2 (default: auto, 6.1)
+  w-emacs-remote-ssh-program          ssh executable override (default: per profile, 6.1)
+  w-emacs-remote-preflight-timeout    seconds to wait for the SSH port (default 3)
 
 Naming: the folder uses underscores (w_emacs_remote). The Elisp symbols and
 file names use hyphens, which is the Emacs convention (w-emacs-remote-*).
@@ -460,9 +596,11 @@ file names use hyphens, which is the Emacs convention (w-emacs-remote-*).
     w-emacs-remote-client.el      ssh and network connection, mirror frame,
                                   layout rebuilder, renderer, face mapping,
                                   key capture, error panels
+    w-emacs-remote-platform.el    platform detection, ssh program, subnet and
+                                  gateway lookup, preflight checks (no UI)
     w-emacs-remote-history.el     saved connections: load, save, dedupe,
                                   prune, corruption recovery (no UI)
-    w-emacs-remote-discovery.el   client sweep and DNS reply parsing (no UI)
+    w-emacs-remote-discovery.el   client sweep (UDP) and dns.el wrapper (no UI)
     w-emacs-remote-tests.el       ERT tests (see section 15)
 
   How config.org loads packages/ is not changed by this design. To be
@@ -474,7 +612,7 @@ file names use hyphens, which is the Emacs convention (w-emacs-remote-*).
 
   D1  Escape prefix used inside a mirror buffer. Default proposed: C-c r.
       The connect and disconnect keys (SPC o t r c, SPC o t r d) are decided
-      (section 6.5). D1 covers only the keys used inside mirror buffers.
+      (section 6.6). D1 covers only the keys used inside mirror buffers.
   D2  Resize the Mac's Emacs frame to match the client while connected.
       Default proposed: yes, restore on disconnect. The Mac user will see the
       window change size while connected.
@@ -503,6 +641,24 @@ file names use hyphens, which is the Emacs convention (w-emacs-remote-*).
   D11 Subnet choice when Windows reports more than one LAN adapter (Wi-Fi,
       Ethernet, VPN). Default proposed: the first private adapter with a
       default gateway, with w-emacs-remote-discovery-subnet as the override.
+      Applies to the Windows and WSL2 sweeps. macOS uses the default route.
+  D12 Plain Linux, Cygwin, and MSYS2 clients. Default proposed: not in v1.
+      Detection reports the platform as unknown and stops. Supporting one
+      later means one more row in the profile table (6.1).
+  D13 WSL2 mirrored networking. Default proposed: detect it and use the eth0
+      address as the subnet source when it is on. Never edit .wslconfig for the
+      user: it is a Windows-side change that restarts WSL. NAT mode still works
+      with the sweep and a typed IP address.
+  D14 Windows without UDP datagram sockets (A14), or with a socket limit below
+      254 (A18). Default proposed: if datagram sockets are missing, turn
+      discovery off on Windows with one message and keep the typed address. If
+      the limit is lower, run the sweep in batches of that size, which is
+      slower. The alternative is a helper process for the sweep, which this
+      design does not have yet.
+  D15 C-g while a server command is busy (A17). Default proposed: document the
+      limit. C-g works between commands and during minibuffer reads. The
+      alternative is to deliver SIGINT to the server, which Emacs treats as a
+      quit. Not tested; decide after the GUI test in A17.
 
 
 14. Milestones and acceptance
@@ -515,8 +671,10 @@ file names use hyphens, which is the Emacs convention (w-emacs-remote-*).
 
   M1  Single-window text mirror
       Text, faces, cursor, keys, scrolling. No splits.
-      Accept: typing, C-g, M-x, and C-v all behave the same on the client
-      as on the server, for one window.
+      Accept: typing, M-x, and C-v behave the same on the client as on the
+      server, for one window. C-g behaves the same between commands and during
+      minibuffer reads. C-g during a busy server command is a known limit until
+      D15 is decided (A17).
 
   M2  Layout
       Window tree, multiple windows, mode line, minibuffer.
@@ -527,20 +685,28 @@ file names use hyphens, which is the Emacs convention (w-emacs-remote-*).
       isearch, show-paren, hl-line, region, cursor types, sanitizing, and
       the image error panel.
       Accept: an image buffer on the server shows the error panel on the
-      client. Other windows keep working.
+      client. Other windows keep working. In a buffer with hl-line and isearch
+      active, the client shows both the background and the foreground (the
+      face rule in 5.2).
 
   M4  SSH transport and lifecycle
-      connect, disconnect, reconnect with backoff, resize sync, ssh failure
-      messages, connection history.
-      Accept: WSL2 client connects to the Mac over the LAN through SSH.
+      Platform detection and preflight (6.1), connect, disconnect, reconnect
+      with backoff, resize sync, ssh failure messages, connection history.
+      Accept: a Windows client and a WSL2 (NAT) client connect to the Mac over
+      the LAN through SSH. A macOS client does too, if a second Mac is
+      available. The status line shows the profile.
       Dropping the network and reconnecting restores the same server state.
+      Each failure in section 9 shows its own message.
 
   M4b Discovery
-      Mac advertises with dns-sd while server mode is on. WSL2 sweep on
-      connect lists discovered servers.
-      Accept: with server mode on, SPC o t r c lists the Mac within 3
-      seconds. With server mode off, it is not listed. Picking a discovered
-      entry connects the same way as a history entry.
+      Mac advertises with dns-sd while server mode is on. Each client sweeps
+      on connect, with the subnet source for its profile (6.1, 6.8). WSL2
+      mirrored mode is detected and reported in the status line. Packets are
+      built and read with dns.el (section 18).
+      Accept: with server mode on, SPC o t r c lists the Mac within 3 seconds
+      on Windows and WSL2 (NAT), and on macOS if a second Mac is available.
+      With server mode off, it is not listed. Picking a discovered entry
+      connects the same way as a history entry.
 
   M5  Polish
       Mouse (v2), tests, documentation.
@@ -562,16 +728,41 @@ file names use hyphens, which is the Emacs convention (w-emacs-remote-*).
       line entry
     - history: save and load round trip; dedupe by host, user, and port;
       pruning to the max; corrupt file recovery
-    - discovery: reply parsing (valid, truncated, compressed names, unrelated
-      services); one unicast query per host address, none to multicast;
-      subnet parsing from ipconfig output; /24 limit
+    - discovery: dns.el round trip for the PTR query, and decoding of valid,
+      truncated, compressed-name, and unrelated replies; a self-pointing
+      compression name and an oversize packet are dropped without hanging;
+      one unicast query per host address, none to multicast; subnet from
+      network-interface-list and ipconfig output; /24 limit
+    - platform detection: each case in 6.1 (darwin, windows-nt, WSL2 kernel,
+      WSL1 kernel, plain Linux, Cygwin) with system-type and the kernel marker
+      stubbed. The override wins over detection.
+    - WSL2 mode: an eth0 address in the same subnet as a Windows adapter gives
+      mirrored; otherwise nat.
+    - preflight: a missing ssh program and a closed port each stop with their
+      own message. A typed name with no known address skips the probe and still
+      starts ssh, which reports the failure.
+    - argument building: no shell string; a host starting with "-" is rejected.
+    - connect path: no call-process, and no hostname given to Emacs networking;
+      tests stub both and fail if either is called.
+    - face rule: an overlay background and a text foreground both survive; a
+      priority clash goes to the higher priority; unspecified falls through;
+      :inherit is followed.
+    - face runs: the next-char-property-change walk gives the same runs as a
+      per-character walk.
+    - decode fixtures: mDNS SRV and TXT records with the cache-flush class bit
+      decode (the class reads as nil, which is not used).
 
   Manual:
     - loopback test on one machine (M0-M1)
     - two machines on the LAN (M2 onward)
-    - the Mac Emacs version and the WSL2 Emacs version both recorded
+    - the Mac Emacs version and each client's Emacs version recorded
     - discovery on the real LAN: Mac server mode on and off, then SPC o t r c
-      from WSL2. Also with a printer or other mDNS device on the LAN.
+      from each client: Windows Emacs, WSL2 Emacs in NAT mode, WSL2 in
+      mirrored mode, and macOS if a second Mac is available. Also with a
+      printer or other mDNS device on the LAN.
+    - on Windows and on WSL2, the 254-socket check from section 18 (A18).
+    - C-g during a long server command (for example, (sleep-for 30) in an
+      eval): record whether it interrupts (A17).
 
 
 16. Assumptions to verify in the prototype
@@ -590,10 +781,32 @@ file names use hyphens, which is the Emacs convention (w-emacs-remote-*).
       without losing the look that matters (colors, weight, slant, underline).
   A7  The macOS mDNS responder answers unicast queries (legacy unicast, RFC
       6762) for a service registered with dns-sd.
-  A8  Replies from the LAN reach WSL2 through NAT and the Windows firewall
-      with no configuration change.
+  A8  In WSL2 NAT mode, replies from the LAN reach WSL2 through the Windows
+      firewall with no configuration change.
   A9  dns-sd stays registered while its process runs, and disappears when
       the process stops.
+  A10 In WSL2 mirrored mode, LAN multicast reaches WSL2, and the eth0 address
+      sits in the same subnet as the Windows adapter.
+  A11 Windows resolves <name>.local through mDNS for ssh.exe with no extra
+      software. If it does not, the Windows profile uses the discovered
+      address.
+  A12 On WSL2 NAT, ipconfig.exe through WSL interop returns the Windows
+      adapter addresses, because eth0 holds an internal address there.
+  A13 dns.el encodes and decodes the discovery packets. The PTR round trip
+      passed on macOS. SRV records and multi-record replies are untested.
+  A14 The client's Emacs has UDP datagram sockets on each platform. Verified
+      on macOS. dns.el's comment says MS-Windows lacks them, so check Windows.
+  A15 network-interface-list returns address and netmask on Windows and WSL2
+      mirrored as well as on macOS. Verified on macOS only.
+  A16 posn-col-row returns character cells in a GUI frame. Batch mode has no
+      redisplay, so the prototype must check it.
+  A17 C-g from the client interrupts a busy server command. Expected: no. A
+      process filter runs only when Lisp yields (checked with a pipe: 0 calls
+      during a 2 s busy loop, 1 call after it). SIGINT as a quit path is
+      untested.
+  A18 The client's Emacs holds 254 UDP sockets open at once on Windows and
+      WSL2 as well as macOS. Verified on macOS only: 254 created in 1.3 ms on
+      loopback.
 
 
 17. Risks
@@ -614,12 +827,123 @@ file names use hyphens, which is the Emacs convention (w-emacs-remote-*).
   R6  Sweep noise on the LAN (254 small packets per connect). Mitigation:
       sweep only on connect, keep results for the session only, and let the
       user turn advertising off.
+  R7  Wrong platform detected (for example, a Cygwin or MSYS2 Emacs reports an
+      unexpected system type). Mitigation: the override, and the status line
+      shows the detected profile so a wrong guess is visible at once.
+  R8  Name resolution differs by platform. A name that works on macOS may fail
+      on WSL2 NAT. Mitigation: Emacs does not resolve names. The address comes
+      from discovery or history, and ssh resolves names in its own process, so
+      the difference shows only as an ssh error.
+  R9  dns.el is a library, not a documented API, and its packet functions may
+      change between Emacs versions. Mitigation: one wrapper in
+      w-emacs-remote-discovery.el, and an ERT round-trip test that runs on each
+      Emacs version in use.
+  R10 C-g cannot interrupt a busy server command (A17). Mitigation: the
+      documented limit, or the SIGINT path if D15 chooses it. A runaway command
+      on the server must still be stopped on the server.
+  R11 The face rule differs from Emacs in corner cases: relative heights, and
+      face lists nested inside other face lists. Mitigation: ERT fixtures taken
+      from real overlays, starting with hl-line, isearch, and show-paren.
 
 
-18. Next step
+18. Built-in Emacs features: reuse review
+-----------------------------------------
+
+  Measured on Emacs 31.1 (Homebrew emacs-plus) on macOS, in batch mode. Batch
+  mode has no redisplay, so layout numbers are not valid. Those need a GUI
+  check (A16).
+
+  Kept, with measurements:
+    dns-write, dns-read      discovery packets (6.8), from dns.el. 90 us per
+                             reply. mDNS SRV and TXT decode; the cache-flush
+                             bit shows as class nil, which is not used.
+    make-network-process     datagram sockets for the sweep (6.8). 254 connected
+                             sockets in 1.3 ms on loopback. Emacs has no sendto
+                             (process-send-to is absent), so one socket per host
+                             is the only native option. See A18.
+    make-network-process     TCP probe to an IP literal with :nowait: 0.2 ms. A
+                             closed port fails at once through the sentinel.
+    overlays-at (SORTED),    face lookup at a position (5.2). A per-character
+    next-char-property-      walk costs 3.3 ms per 80x40 snapshot. A run walk
+    change                   with next-char-property-change costs 1.0 ms and
+                             finds the same 565 runs.
+    json-serialize,          patch encoding (7.1). 50 us to encode and 190 us to
+    json-parse-string        parse a 40-line patch.
+    run-at-time              coalescing timer (5.2). 2.6 us per cancel and
+                             reschedule.
+    network-interface-list   adapter addresses and netmasks (6.1, 6.8). macOS:
+                             en0 with a /24 mask, plus utun0 and lo0. The
+                             gateway still needs route or ipconfig.
+    face-all-attributes      face table (5.4). Follows :inherit (tested).
+    unread-command-events    ordinary keys, in order (5.5, A3). C-g is excluded
+                             (see below).
+    window-tree              layout message (5.2, 6.4). Needs a GUI check.
+    posn-col-row,            cursor cell (5.2, A2). Needs a GUI check (A16).
+    posn-at-point
+    completing-read          connect prompt (6.7). Documented.
+
+  Rebuilt or changed:
+    Hostname lookup in       Removed from the connect path. Looking up an
+    Emacs                    unknown .local name blocked Emacs for 5.0 s, and
+                             make-network-process with a hostname blocks the
+                             same way even with :nowait t. A known .local name
+                             takes 2 ms. Addresses come from discovery or
+                             history (6.1). ssh resolves names in a child
+                             process.
+    Face merge               Own rule (5.2). Taking the top overlay face drops
+                             the text face, so an overlay background and a text
+                             foreground cannot both show. I found no public
+                             Emacs function that returns the merged face at a
+                             position.
+    C-g path                 unread-command-events stays for ordinary keys. A
+                             C-g does not interrupt a busy server command,
+                             because a process filter runs only when Lisp yields
+                             (A17). Decision D15.
+    Child processes          ssh, route, ipconfig, and ipconfig.exe start with
+                             make-process and a sentinel. call-process is not
+                             used on the connect path. Not measured, but
+                             ipconfig.exe over WSL interop is likely slow enough
+                             to freeze Emacs.
+
+  Not reused, and why:
+    - server.el TCP mode (server-use-tcp): one request per connection, and the
+      auth key is sent in plain text. The streaming listener stays with
+      make-network-process.
+    - emacsclient -t over TCP: the server opens the client's tty by device name
+      (-tty DEVICENAME TYPE), so the client must run on the same machine. A
+      daemon route with ssh -t and emacsclient -t would use that, but it is a
+      separate option, not part of this design.
+    - dns-query: uses only the servers in dns-servers, so it cannot run the
+      sweep. Only the packet functions are used.
+
+  Known gaps:
+    - dns-read-name follows compression pointers with no loop guard. The
+      self-pointing case errors and condition-case catches it (7 ms).
+    - dns.el is a library, not a documented API. Keep it behind one wrapper
+      (R9).
+
+  Windows checks, run in Windows Emacs 31.1 before M4b:
+    (featurep 'make-network-process '(:type datagram))    ; A14: must be t
+    (network-interface-list t 'ipv4)                      ; A15
+    (let (ps)                                             ; A18: expect 254
+      (condition-case e
+          (dotimes (i 254)
+            (push (make-network-process :name (format "s%d" i) :type 'datagram
+                                        :noquery t
+                                        :remote (vector 127 0 0 1 (+ 20000 i)))
+                  ps))
+        (error (message "failed after %d: %S" (length ps) e)))
+      (mapc #'delete-process ps)
+      (length ps))
+  In PowerShell: ping <mac-name>.local (A11). ssh.exe needs that name to
+  resolve, and Emacs itself does not.
+
+
+19. Next step
 -------------
 
-  Review this document. Answer D1-D11, especially D2 (resize), D8
-  (SPC o t conflict), D9 (forget key), D10, and D11. After that, the first
-  build step is M0 on one machine, with no
-  SSH and no UI, to test the protocol.
+  Review this document. Answer D1-D15, especially D2 (resize), D8
+  (SPC o t conflict), D9 (forget key), D10, D11, D13 (WSL2 mirrored
+  mode), D14 (Windows sweep), and D15 (C-g). Run the Windows checks in
+  section 18 before M4b. After that, the first build step is M0 on one
+  machine, with no SSH and no UI, to test the protocol.
